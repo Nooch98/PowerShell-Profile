@@ -1,16 +1,15 @@
 local wezterm = require 'wezterm'
+local theme = wezterm.plugin.require('https://github.com/neapsix/wezterm').main
 local act = wezterm.action
-
--- This will hold the configuration
 local config = {}
 
 if wezterm.config_builder then config =  wezterm.config_builder() end
 
--- This is where is my config apply
 config.default_prog = {'pwsh'}
-config.color_scheme = 'Tokyo Night'
-config.font = wezterm.font('CaskaydiaMono Nerd Font')
-config.font_size = 11
+config.colors = theme.colors()
+config.window_frame = theme.window_frame()
+config.font = wezterm.font('FiraCode Nerd Font')
+config.font_size = 10
 config.window_background_opacity = 0.9
 config.window_decorations = "RESIZE"
 config.default_workspace = "home"
@@ -24,36 +23,41 @@ config.inactive_pane_hsb = {
 config.keys = {
   {
     -- Crear un panel en horizontal
-    key = 'h',
+    key = 'd',
     mods = 'ALT|SHIFT',
     action = wezterm.action.SplitHorizontal { domain = 'CurrentPaneDomain' },
   },
   {
-    -- Crear un panel en vertical
-    key = 'v',
+    -- Create a vertical panel
+    key = 's',
     mods = 'ALT|SHIFT',
     action = wezterm.action.SplitVertical { domain = 'CurrentPaneDomain'},
   },
   {
-    -- Moverme al panel de la izquierda
+    key = 'z',
+    mods = 'CTRL|SHIFT',
+    action = act.TogglePaneZoomState,
+  },
+  {
+    -- Move to the left panel
     key = 'LeftArrow',
     mods = 'ALT',
     action = act.ActivatePaneDirection 'Left',
   },
   {
-    -- Moverme al panel de la derecha
+    -- Move to the right panel
     key = 'RightArrow',
     mods = 'ALT',
     action = act.ActivatePaneDirection 'Right',
   },
   {
-    -- Moverme al panel de arriba
+    -- Move to the top panel
     key = 'UpArrow',
     mods = 'ALT',
     action = act.ActivatePaneDirection 'Up',
   },
   {
-    -- Moverme al panel de abajo
+    -- Move to the panel below
     key = 'DownArrow',
     mods = 'ALT',
     action = act.ActivatePaneDirection 'Down',
@@ -98,7 +102,7 @@ config.keys = {
     mods = 'ALT|SHIFT',
     action = act.ActivateTabRelative(1)
   },
-  -- Shortcuts para resize de los paneles
+  -- Shortcuts for resizing panels
   {
     key = 'LeftArrow',
     mods = 'CTRL|ALT',
@@ -124,23 +128,24 @@ config.keys = {
 config.use_fancy_tab_bar = false
 config.status_update_interval = 1000
 config.tab_bar_at_bottom = false
+local basename = function(s)
+  if s then
+    local result = s:match('.*[/\\](.*)')
+    return result or s
+  end
+  return ""
+end
 wezterm.on("update-status", function(window, pane)
   local stat = window:active_workspace()
   local stat_color = "#f7768e"
   if window:active_key_table() then stat = window:active_key_table() stat_color = "#7dcfff" end
   if window:leader_is_active() then stat = "LDR" stat_color = "#bb9af7" end
-  local basename = function(s)
-    return string.gsub(s, "(.*[/\\])(.*))", "%2")
-  end
-  local cwd = pane:get_current_working_dir()
-  if cwd then
-    if type(cwd) == "userdata" then
-      cwd = basename(cwd.file_path)
-    else
-      cwd = basename(cwd)
-    end
-  else
-    cwd = ""
+  local cwd_uri = pane:get_current_working_dir()
+  local cwd_path = wezterm.uri.file_path(cwd_uri)
+  local cwd = ''
+  if cwd_path then
+    local result = cwd_path:match('.*[/\\](.*)')
+    cwd = result or cwd_path
   end
   local cmd = pane:get_foreground_process_name()
   cmd = cmd and basename(cmd) or ""
@@ -164,5 +169,5 @@ wezterm.on("update-status", function(window, pane)
     { Text = "  " },
   })
 end)
-
 return config
+	
