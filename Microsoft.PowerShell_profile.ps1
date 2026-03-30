@@ -268,6 +268,60 @@ function Update-Choco {
     }
 }
 
+function Get-InstallMethod {
+    param([Parameter(Mandatory=$true)] [string]$AppName)
+
+    Write-Host " 🔍 Searching installation source for: '$AppName'..." -ForegroundColor Gray
+    $found = $false
+
+    if (Get-Command scoop -ErrorAction SilentlyContinue) {
+        $scoopCheck = scoop list $AppName | Select-String $AppName
+        if ($scoopCheck) { 
+            Write-Host " 📦 [SCOOP]: Found '$AppName'. Uninstall with 'scoop uninstall $AppName'" -ForegroundColor Cyan
+            $found = $true
+        }
+    }
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        $wingetCheck = winget list --query $AppName | Select-String $AppName
+        if ($wingetCheck) {
+            Write-Host " 📦 [WINGET]: Found '$AppName'. Uninstall with 'winget uninstall $AppName'" -ForegroundColor Blue
+            $found = $true
+        }
+    }
+
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        $chocoCheck = choco list --local-only $AppName | Select-String $AppName
+        if ($chocoCheck) {
+            Write-Host " 📦 [CHOCO]: Found '$AppName'. Uninstall with 'choco uninstall $AppName'" -ForegroundColor Green
+            $found = $true
+        }
+    }
+
+    if (-not $found) {
+        $regPaths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+        )
+        $regCheck = Get-ItemProperty $regPaths | Where-Object { $_.DisplayName -match $AppName } | Select-Object DisplayName, DisplayVersion
+        
+        if ($regCheck) {
+            foreach ($app in $regCheck) {
+                Write-Host " 🖥️  [NORMAL EXE]: Found '$($app.DisplayName)' (v$($app.DisplayVersion))" -ForegroundColor Yellow
+                Write-Host "    Use Control Panel or 'Apps & Features' to manage it." -ForegroundColor DarkGray
+            }
+            $found = $true
+        }
+    }
+
+    if (-not $found) {
+        Write-Host " ❌ No installation found for '$AppName' in known managers or registry." -ForegroundColor Red
+    }
+}
+
+Set-Alias "whereis" Get-InstallMethod
+
 # ========================================================================
 # 4. KEY HANDLERS (Shortcuts)
 # ------------------------------------------------------------------------
@@ -282,22 +336,54 @@ Set-PSReadLineKeyHandler -Key 'Ctrl+g' -ScriptBlock {
 }
 
 Set-PSReadLineKeyHandler -Key 'Ctrl+u' -ScriptBlock {
-    param($key, $arg)
+    $urlRegex = '(https?://[^\s"''<>]+)'
 
-    $buffer = [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState()
-    $line = $buffer.Line
+    $currentLine = ""
+    $cursor = 0
+    [Microsoft.PowerShell.PSReadLine]::GetBufferState([ref]$currentLine, [ref]$cursor)
+    
+    $historyText = Get-History -Count 20 | Select-Object -ExpandProperty CommandLine
 
-    $urlRegex = '(?i)\b((?:[a-z][\w-]+:(?:/{1,3}|[a-z0-9%])|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:\''".,<>?«»“”‘’]))'
+    $allText = @($currentLine) + $historyText
+    $matches = $allText | ForEach-Object { 
+        [regex]::Matches($_, $urlRegex) | ForEach-Object { $_.Value.TrimEnd(')', ']', '.', ',', ';') }
+    } | Select-Object -Unique
 
-    $match = $line | Select-String -Pattern $urlRegex -AllMatches
-
-    if ($match) {
-        $urltocopy = $match.Matches[-1].Value
-        Set-Clipboard -Value $urltocopy
-        Write-Host "✅ URL Copy: $urltocopy" -ForegroundColor Green
-    } else {
-        Write-Host "❌ No URL was found in the current command line." -ForegroundColor Red
+    if (-not $matches) {
+        $matches = [Microsoft.PowerShell.PSConsoleReadLine]::GetKeyHandlers() | Out-Null
+        Write-Host "`n  󰅚 No URLs found in history or current line." -ForegroundColor Red
+        [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()
+        return
     }
+
+    $selectedUrl = $matches | fzf --reverse --height 40% --header "󰖟 SELECT URL TO COPY" --border
+
+    if ($selectedUrl) {
+        Set-Clipboard -Value $selectedUrl.Trim()
+        Write-Host "`n  ✅ Copied: $selectedUrl" -ForegroundColor Green
+    }
+    
+    [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()
+}
+
+function Get-ConsoleScreenBuffer {
+    param([int]$MaxLines = 100)
+    $hostUI = $Host.UI.RawUI
+    $rect = New-Object Management.Automation.Host.Rectangle
+    $rect.Left = 0
+    $rect.Top = [Math]::Max(0, $hostUI.CursorPosition.Y - $MaxLines)
+    $rect.Right = $hostUI.BufferSize.Width
+    $rect.Bottom = $hostUI.CursorPosition.Y
+    
+    $buffer = $hostUI.GetBufferContents($rect)
+    $text = ""
+    for ($y = 0; $y -lt $buffer.GetUpperBound(0); $y++) {
+        for ($x = 0; $x -lt $buffer.GetUpperBound(1); $x++) {
+            $text += $buffer[$y, $x].Character
+        }
+        $text += "`n"
+    }
+    return $text
 }
 
 function Invoke-FuzzyOpen {
@@ -312,9 +398,38 @@ function Invoke-FuzzyOpen {
 }
 
 function Get-NetworkPorts {
-    Get-NetTCPConnection -State Listen | 
-    Select-Object LocalPort, OwningProcess, State | 
-    Sort-Object LocalPort
+    Write-Host "`n  󱘖  LISTENING NETWORK PORTS" -ForegroundColor Magenta
+    Write-Host "  ================================================================" -ForegroundColor DarkGray
+
+    $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+        $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
+        [PSCustomObject]@{
+            Port     = $_.LocalPort
+            Process  = if ($proc) { $proc.ProcessName } else { "Unknown" }
+            PID      = $_.OwningProcess
+            Protocol = $_.AppliedSetting 
+        }
+    } | Sort-Object Port -Unique
+
+    Write-Host "    PORT".PadRight(10) + "PROCESS".PadRight(25) + "PID".PadRight(10) -ForegroundColor Cyan
+    Write-Host "    ----".PadRight(10) + "-------".PadRight(25) + "---".PadRight(10) -ForegroundColor DarkGray
+
+    foreach ($p in $ports) {
+        $color = "White"
+        if ($p.Port -in @(80, 443, 3000, 5000, 8080, 8443)) { $color = "Yellow" }
+        if ($p.Port -eq 5432 -or $p.Port -eq 3306) { $color = "Cyan" }
+
+        $portStr = "    $($p.Port)".PadRight(10)
+        $procStr = "$($p.Process)".PadRight(25)
+        $pidStr  = "$($p.PID)".PadRight(10)
+
+        Write-Host $portStr -ForegroundColor $color -NoNewline
+        Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+        Write-Host $procStr -ForegroundColor White -NoNewline
+        Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+        Write-Host $pidStr -ForegroundColor Gray
+    }
+    Write-Host "`n  Total active listeners: $($ports.Count)`n" -ForegroundColor DarkGray
 }
 
 function Set-ExtractFile {
@@ -625,67 +740,294 @@ function get-weather-full {
     curl.exe -s "wttr.in/$($config.weatherCity)?m2" 
 }
 
+function Invoke-Zap {
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true, Position=0)]
+        [string]$Target
+    )
+
+    process {
+        if (!(Test-Path $Target)) {
+            Write-Host " ❌ Error: Target '$Target' not found." -ForegroundColor Red
+            return
+        }
+
+        $fullPath = (Resolve-Path $Target).Path
+        $isDir = Test-Path $fullPath -PathType Container
+        $type = if ($isDir) { "DIRECTORY" } else { "FILE" }
+
+        Write-Host "`n ⚠️  DANGER: You are about to permanently delete ${type}: " -NoNewline -ForegroundColor Yellow
+        Write-Host $fullPath -ForegroundColor White
+        $confirm = Read-Host "    Are you sure? (y/N)"
+        if ($confirm -ne "y") { Write-Host "  Aborted." -ForegroundColor Gray; return }
+
+        Write-Host "`n 󰆴 Starting Atomic Delete..." -ForegroundColor Cyan
+
+        try {
+            if ($isDir) {
+                Get-ChildItem -Path $fullPath -Recurse -Force | ForEach-Object {
+                    Write-Host "    󰆴 Deleting: $($_.FullName)" -ForegroundColor DarkGray
+                    Remove-Item -Path $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
+                }
+
+                Write-Host "    󱆳 Finalizing directory removal..." -ForegroundColor Blue
+                cmd /c "rd /s /q `"$fullPath`"" 2>$null
+            } else {
+                Write-Host "    󰆴 Deleting: $fullPath" -ForegroundColor DarkGray
+                Set-ItemProperty -Path $fullPath -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
+                Remove-Item -Path $fullPath -Force
+            }
+
+            if (!(Test-Path $fullPath)) {
+                Write-Host "`n ✅ ZAP! Successfully obliterated." -ForegroundColor Green
+            } else {
+                Write-Host "`n ❌ Error: The system is still locking some items." -ForegroundColor Red
+            }
+        } catch {
+            Write-Host "`n ❌ Critical Error: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+}
+
+function Invoke-QuickSearch {
+    param([string]$query = "")
+    
+    Write-Host " 🔍 Searching accurately... (Ctrl+C to abort)" -ForegroundColor DarkGray
+
+    $files = Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue | 
+        Where-Object { 
+            $_.FullName -notmatch '\\\.git|\\\.venv|\\node_modules' -and
+            ($query -eq "" -or $_.Name -match $query -or $_.Extension -match $query)
+        } | ForEach-Object { $_.FullName }
+
+    if (-not $files) {
+        Write-Host " ❌ No files matching '$query' found." -ForegroundColor Red
+        return
+    }
+
+    $selection = $files | fzf --query "$query" `
+        --reverse `
+        --header "󰩉 EXACT FIND & ACTION" `
+        --tiebreak=end,length `
+        --extended `
+        --preview "bat --color=always --style=numbers {1}"
+    
+    if ($selection) {
+        $selection = $selection.Trim()
+        Write-Host "`n 📄 Selected: " -NoNewline -ForegroundColor Cyan
+        Write-Host (Split-Path $selection -Leaf) -ForegroundColor White
+        
+        $action = Read-Host "    (o)pen in Code | (c)opy path | (g)o to folder? [o/c/g]"
+        switch ($action) {
+            "o" { code $selection }
+            "c" { $selection | clip; Write-Host "  ✅ Path copied to clipboard!" -ForegroundColor Green }
+            "g" { Set-Location (Split-Path $selection) }
+            default { Write-Host "  󰅚 Operation cancelled." -ForegroundColor Gray }
+        }
+    }
+}
+
+function Invoke-KillProcess {
+    $proc = Get-Process | 
+        Select-Object ProcessName, Id, @{Name="Mem(MB)"; Expression={[math]::Round($_.WorkingSet / 1MB, 2)}} | 
+        Sort-Object Mem -Descending | 
+        ForEach-Object { "$($_.ProcessName.PadRight(20)) | ID: $($_.Id.ToString().PadRight(8)) | Mem: $($_.Mem) MB" } |
+        fzf --reverse --header "󰆴 SELECT PROCESS TO KILL (Sniper Mode)" --height 50%
+
+    if ($proc) {
+        $pid = ($proc -split "ID: ")[1].Split("|")[0].Trim()
+        Stop-Process -Id $pid -Force
+        Write-Host "  ✅ Process $pid terminated." -ForegroundColor Green
+    }
+}
+
+function Get-GitStatusSummary {
+    Write-Host "`n  󰊢  GIT REPOSITORY SCANNER" -ForegroundColor Cyan
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    
+    Get-ChildItem -Directory | ForEach-Object {
+        $dotGit = Join-Path $_.FullName ".git"
+        if (Test-Path $dotGit) {
+            Push-Location $_.FullName
+            $status = git status --porcelain
+            $branch = git rev-parse --abbrev-ref HEAD
+            $color = if ($status) { "Yellow" } else { "Green" }
+            $icon = if ($status) { "󱓻" } else { "󰄬" }
+
+            Write-Host "  $icon  " -NoNewline -ForegroundColor $color
+            Write-Host "$($_.Name.PadRight(20))" -NoNewline -ForegroundColor White
+            Write-Host " [$branch]" -ForegroundColor Gray
+            Pop-Location
+        }
+    }
+    Write-Host ""
+}
+
+function New-Project {
+    param([string]$Path = "")
+
+    $config = Get-ProfileConfig
+    $basePath = if ($Path) { $Path } else { $config.projectRoot }
+
+    if (-not (Test-Path $basePath)) {
+        Write-Host " ❌ Base path not found: $basePath" -ForegroundColor Red; return
+    }
+
+    Write-Host "`n  󰚝  PROJECT ARCHITECT v2" -ForegroundColor Magenta
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    
+    $languages = @(
+        "Flutter", "Python", "Vite (React/Vue/Svelte)", "Rust", 
+        "C++ (CMake)", "Node.js", "C# / .NET", "Web (HTML/CSS/JS)"
+    )
+    $lang = $languages | fzf --reverse --height 45% --header "SELECT STACK" --border
+
+    if (-not $lang) { return }
+
+    $name = Read-Host "  󰋚 Enter Project Name"
+    if (-not $name) { Write-Host "  󰅚 Cancelled." -ForegroundColor Gray; return }
+
+    $fullPath = Join-Path $basePath $name
+
+    if (Test-Path $fullPath) { 
+        Write-Host " ⚠️ Folder already exists!" -ForegroundColor Yellow; return 
+    }
+
+    Write-Host "`n  🏗️  Building $lang project..." -ForegroundColor Cyan
+
+    switch ($lang) {
+        "Vite (React/Vue/Svelte)" {
+            Set-Location $basePath
+            npm create vite@latest $name
+        }
+        "Rust" {
+            Set-Location $basePath
+            cargo new $name
+        }
+        "C++ (CMake)" {
+            New-Item -Path $fullPath -ItemType Directory | Out-Null
+            Set-Location $fullPath
+
+            cmake -B . -S . --init 2>$null 
+
+            if (-not (Test-Path "CMakeLists.txt")) {
+                Write-Host "  📦 Generating Modern C++ Template..." -ForegroundColor DarkGray
+                New-Item -Path "src", "include" -ItemType Directory | Out-Null
+
+                $cmakeTemplate = @"
+cmake_minimum_required(VERSION 3.20)
+project($name VERSION 1.0.0 LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+file(GLOB_RECURSE SOURCES "src/*.cpp")
+add_executable(\${PROJECT_NAME} \${SOURCES})
+target_include_directories(\${PROJECT_NAME} PUBLIC include)
+"@
+                $cmakeTemplate | Out-File "CMakeLists.txt" -Encoding utf8
+                "#include <iostream>`n`nint main() {`n    std::cout << ""Hello $name!"" << std::endl;`n    return 0;`n}" | Out-File "src/main.cpp"
+            }
+        }
+        "Flutter" {
+            Set-Location $basePath
+            flutter create $name
+        }
+        "Python" {
+            New-Item -Path $fullPath -ItemType Directory | Out-Null
+            Set-Location $fullPath
+            New-Item -Path "src", "tests" -ItemType Directory | Out-Null
+            New-Item -Path "src\main.py" -ItemType File | Out-Null
+            Write-Host "  📦 Creating virtual environment..." -ForegroundColor DarkGray
+            python -m venv .venv
+            ".venv/`n__pycache__/`n.env" | Out-File .gitignore
+            Write-Host "  ✅ Python project ready." -ForegroundColor Green
+        }
+        "Node.js" {
+            New-Item -Path $fullPath -ItemType Directory | Out-Null
+            Set-Location $fullPath
+            npm init -y | Out-Null
+            "node_modules/`n.env" | Out-File .gitignore
+            Write-Host "  ✅ Node.js initialized." -ForegroundColor Green
+        }
+        "C# / .NET" {
+            New-Item -Path $fullPath -ItemType Directory | Out-Null
+            Set-Location $fullPath
+            dotnet new console
+        }
+        "Web (HTML/CSS/JS)" {
+            New-Item -Path $fullPath -ItemType Directory | Out-Null
+            Set-Location $fullPath
+            New-Item -Path "index.html", "style.css", "main.js" -ItemType File | Out-Null
+            Write-Host "  ✅ Web boilerplate ready." -ForegroundColor Green
+        }
+    }
+
+    Set-Location $fullPath
+    Write-Host "`n  🚀 Project '$name' is ready at $fullPath" -ForegroundColor Magenta
+    $open = Read-Host "  Open in VS Code? (y/N)"
+    if ($open -eq "y") { code . }
+}
+
 function help-system {
     Clear-Host
     Write-Host "`n  󰞷  TERMINAL COMMAND CENTER - USER GUIDE" -ForegroundColor Magenta
     Write-Host "  ================================================================" -ForegroundColor DarkGray
 
-    $commands = @(
-        # Navigation & Files
-        @{ Cmd = "l / ll / la"; Desc = "List files (eza) with icons/details" },
-        @{ Cmd = ".. [n]";     Desc = "Go up 'n' levels in directories (default 1)" },
-        @{ Cmd = "mcd <dir>";   Desc = "Create directory and enter it immediately" },
-        @{ Cmd = "ff";          Desc = "Fuzzy search files and open in VS Code" },
-        @{ Cmd = "extr <file>"; Desc = "Extract compressed files (zip, rar, 7z, tar...)" },
-        
-        # System & Info
-        @{ Cmd = "welcome";     Desc = "Show system dashboard / Neofetch style" },
-        @{ Cmd = "info";        Desc = "Run detailed system info script" },
-        @{ Cmd = "uptime / di"; Desc = "Show system boot time / Disk usage" },
-        @{ Cmd = "myip";        Desc = "Show Local, Public IP and DNS info" },
-        @{ Cmd = "ports";       Desc = "List all active listening network ports" },
-        
-        # Development & Python
-        @{ Cmd = "p <query>";   Desc = "Project Navigator: Search and jump to projects" },
-        @{ Cmd = "va [name]";   Desc = "Activate Python Virtual Environment (venv/.venv)" },
-        @{ Cmd = "sql <db>";    Desc = "Execute python SQL viewer script" },
-        @{ Cmd = "rs";          Desc = "GitHub Repository Stats (Stars, Views, Clones)" },
-        
-        # Productivity & Tools
-        @{ Cmd = "t [task]";    Desc = "To-Do List: Add task or manage pending ones" },
-        @{ Cmd = "remind <m> <msg>"; Desc = "Set a timer for 'm' minutes with popup" },
-        @{ Cmd = "fp <text>";   Desc = "Fuzzy Find text inside files (ripgrep + bat)" },
-        @{ Cmd = "st";          Desc = "Interactive Terminal Theme/Scheme selector" },
-        
-        # Maintenance
-        @{ Cmd = "reload / ep"; Desc = "Reload $PROFILE / Edit $PROFILE in Code" },
-        @{ Cmd = "us/uw/uc";    Desc = "Update managers: Scoop / Winget / Choco" },
-        @{ Cmd = "rmmodf";      Desc = "Fuzzy uninstall PowerShell modules" }
-    )
-
-    Write-Host "  CMD             DESCRIPTION" -ForegroundColor Cyan
-    Write-Host "  ---             -----------" -ForegroundColor DarkGray
-
-    foreach ($c in $commands) {
-        $cmdText = "  $($c.Cmd)".PadRight(18)
-        Write-Host $cmdText -ForegroundColor Green -NoNewline
-        Write-Host $c.Desc -ForegroundColor White
+    function Out-Cmd ($List) {
+        foreach ($c in $List) {
+            Write-Host "    $($c.Cmd.PadRight(16))" -ForegroundColor Green -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            Write-Host $c.Desc -ForegroundColor White
+        }
     }
 
-    Write-Host "`n  󰌌  KEYBOARD SHORTCUTS:" -ForegroundColor Magenta
+    Write-Host "`n  󰙅  NAVIGATION & FILES" -ForegroundColor Cyan
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  [Ctrl + T] " -ForegroundColor Yellow -NoNewline; Write-Host "Fuzzy file search & copy path"
-    Write-Host "  [Ctrl + G] " -ForegroundColor Yellow -NoNewline; Write-Host "Interactive folder navigation (zoxide + fzf)"
-    Write-Host "  [Ctrl + R] " -ForegroundColor Yellow -NoNewline; Write-Host "Smart history search"
-    Write-Host "  [Ctrl + U] " -ForegroundColor Yellow -NoNewline; Write-Host "Extract and copy URL from current line"
-    Write-Host "  [Ctrl + L] " -ForegroundColor Yellow -NoNewline; Write-Host "Clear screen (Native)"
+    Out-Cmd @(
+        @{ Cmd = "l / ll / la"; Desc = "List files (eza) with icons/details" },
+        @{ Cmd = ".. [n]";      Desc = "Go up 'n' levels in directories" },
+        @{ Cmd = "mcd <dir>";   Desc = "Create directory and enter it immediately" },
+        @{ Cmd = "ff";          Desc = "Fuzzy search files and open in VS Code" },
+        @{ Cmd = "extr <file>"; Desc = "Extract compressed files (zip, rar, 7z...)" },
+        @{ Cmd = "zap <path>";   Desc = "Atomic Delete: Forcefully remove files/folders with live progress" },
+        @{ Cmd = "find";         Desc = "Quick Search: Find file and choose (Open/Copy/Go)" },
+        @{ Cmd = "gs";           Desc = "Git Summary: Scan all subfolders for git status" },
+        @{ Cmd = "newp [path]";  Desc = "Project Architect: Interactive scaffolding for dev projects" }
+    )
 
-    Write-Host "`n  󰚌  EXTRA PROTOCOLS:" -ForegroundColor Cyan
+    Write-Host "`n  󰘚  SYSTEM & VISUALIZATION" -ForegroundColor Yellow
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "  w         " -ForegroundColor Yellow -NoNewline; Write-Host "Full 3-day weather forecast"
-    Write-Host "  ed        " -ForegroundColor Yellow -NoNewline; Write-Host "Quick-edit file in VS Code using FZF"
-    Write-Host "  hix       " -ForegroundColor Yellow -NoNewline; Write-Host "Search history and EXECUTE immediately"
-    Write-Host "  matrix    " -ForegroundColor Yellow -NoNewline; Write-Host "Enter digital rain mode (requires cmatrix)"
+    Out-Cmd @(
+        @{ Cmd = "welcome";     Desc = "Show system dashboard / Neofetch style" },
+        @{ Cmd = "ps";          Desc = "Top 20 process monitor with CPU/RAM icons" },
+        @{ Cmd = "jv <file>";   Desc = "Visualize JSON structure in tree view" },
+        @{ Cmd = "lv <file>";   Desc = "Log viewer with smart color-coding" },
+        @{ Cmd = "cv <file>";   Desc = "CSV table viewer or GUI explorer" },
+        @{ Cmd = "wup";         Desc = "Scan and display Winget updates visually" }
+    )
+
+    Write-Host "`n  󰠵  MAINTENANCE & TOOLS" -ForegroundColor Green
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Out-Cmd @(
+        @{ Cmd = "reload / ep"; Desc = "Reload / Edit `$PROFILE` in VS Code" },
+        @{ Cmd = "us / uw / uc"; Desc = "Update managers: Scoop / Winget / Choco" },
+        @{ Cmd = "whereis";     Desc = "Check if app was installed via Package Manager" },
+        @{ Cmd = "myip / ports"; Desc = "Network info / Active listening ports" },
+        @{ Cmd = "kill";         Desc = "Sniper Mode: Select and force-kill processes via FZF" }
+    )
+
+    Write-Host "`n  󰌌  KEYBOARD SHORTCUTS" -ForegroundColor Magenta
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "    [Ctrl + T]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Fuzzy file search & copy path"
+    Write-Host "    [Ctrl + G]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Interactive folder navigation (zoxide)"
+    Write-Host "    [Ctrl + R]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Smart history search"
+    Write-Host "    [Ctrl + L]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Clear screen (Native)"
+
+    Write-Host "`n  󰚌  EXTRA PROTOCOLS" -ForegroundColor Blue
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "    w           " -ForegroundColor Yellow -NoNewline; Write-Host "│ Full 3-day weather forecast"
+    Write-Host "    ed          " -ForegroundColor Yellow -NoNewline; Write-Host "│ Quick-edit file in VS Code using FZF"
+    Write-Host "    hix         " -ForegroundColor Yellow -NoNewline; Write-Host "| Search history and EXECUTE immediately"
+    Write-Host "    matrix      " -ForegroundColor Yellow -NoNewline; Write-Host "│ Enter digital rain mode (cmatrix)"
     
     Write-Host "`n  Type 'help' anytime to see this menu.`n" -ForegroundColor DarkGray
 }
@@ -741,7 +1083,7 @@ function welcome {
     $weatherClean = "Unknown" 
     if ($global:canConnectToGithub) {
         try {
-            $weatherRaw = curl.exe -s "wttr.in/$($weatherCity)?format=3" --connect-timeout 2
+            $weatherRaw = curl.exe -s "wttr.in/$($weatherCity)?format=%t" --connect-timeout 2
             if ($weatherRaw -and $weatherRaw -notmatch "HTML") {
                 $weatherClean = $weatherRaw.Replace("┬░", "°").Replace("Â", "").Trim()
             }
@@ -854,8 +1196,231 @@ function welcome {
 
     Write-Host "  󰸌  $currentScheme " -ForegroundColor Magenta -NoNewline
     Write-Host "($totalThemes available)" -ForegroundColor DarkGray
+    Write-Host "`n  Type 'help' or 'h' anytime to see help menu.`n" -ForegroundColor DarkGray
     Write-Host ""
 
+}
+
+function Check-WingetVisual {
+    Write-Host "`n 󰚰  Scanning for Winget updates..." -ForegroundColor Magenta
+
+    $raw = winget upgrade | Where-Object { $_ -match '\S' }
+
+    $headerLine = ""
+    $dividerLine = ""
+    for ($i = 0; $i -lt $raw.Count; $i++) {
+        if ($raw[$i] -match '^-+$') { 
+            $headerLine = $raw[$i-1]
+            $dividerLine = $raw[$i]
+            $dataStart = $i + 1
+            break 
+        }
+    }
+
+    if (-not $dividerLine) {
+        Write-Host " ✅ All systems operational. No updates found." -ForegroundColor Green
+        return
+    }
+
+    $posId        = $headerLine.IndexOf("Id")
+    if ($posId -lt 0) { $posId = $headerLine.IndexOf("ID") }
+    
+    $posVersion   = $headerLine.IndexOf("Versi")
+    if ($posVersion -lt 0) { $posVersion = $headerLine.IndexOf("Version") }
+    
+    $posAvailable = $headerLine.IndexOf("Dispon")
+    if ($posAvailable -lt 0) { $posAvailable = $headerLine.IndexOf("Available") }
+
+    Write-Host "   UPDATES AVAILABLE:" -ForegroundColor Cyan
+    $separator = "─" * 165
+    Write-Host " $separator" -ForegroundColor DarkGray
+    Write-Host "  $( "APPLICATION".PadRight(35) ) $( "CURRENT".PadRight(25) ) $( "LATEST".PadRight(25) ) $( "QUICK UPDATE COMMAND" )" -ForegroundColor White
+    Write-Host " $separator" -ForegroundColor DarkGray
+
+    $raw | Select-Object -Skip $dataStart | ForEach-Object {
+        $line = $_
+        if ($line -match "actualizaciones disponibles" -or $line -match "updates available") { return }
+
+        try {
+            $name    = $line.Substring(0, $posId).Trim()
+            $id      = $line.Substring($posId, ($posVersion - $posId)).Trim()
+            $current = $line.Substring($posVersion, ($posAvailable - $posVersion)).Trim()
+            $latest  = $line.Substring($posAvailable).Trim().Split(' ')[0]
+
+            $dispName = if ($name.Length -gt 33) { $name.Substring(0, 30) + "..." } else { $name }
+            $commandId = if ($id -match '…') { $id -replace '…', '*' } else { $id }
+
+            Write-Host "  󰏗  " -NoNewline -ForegroundColor Yellow
+            Write-Host "$( $dispName.PadRight(31) )" -NoNewline -ForegroundColor White
+            Write-Host "$( $current.PadRight(25) )" -NoNewline -ForegroundColor Gray
+            Write-Host " ➜  " -NoNewline -ForegroundColor Magenta
+            Write-Host "$( $latest.PadRight(24) )" -NoNewline -ForegroundColor Green
+            
+            Write-Host "   " -NoNewline -ForegroundColor DarkGray
+            Write-Host "winget update --id " -NoNewline -ForegroundColor DarkCyan
+            Write-Host $commandId -ForegroundColor Cyan
+        } catch { }
+    }
+
+    Write-Host " $separator" -ForegroundColor DarkGray
+    Write-Host " 💡 Total items found: $(($raw.Count - $dataStart - 1))" -ForegroundColor Gray
+    Write-Host ""
+}
+
+function ConvertFrom-SourceTable {
+    param([Parameter(ValueFromPipeline=$true)] [string[]]$InputObject)
+    begin { $lines = @() }
+    process { $lines += $InputObject }
+    end {
+        if ($lines.Count -lt 2) { return }
+        $headerLine = $lines | Where-Object { $_ -match '^[a-zA-Z].*\s{2,}' } | Select-Object -First 1
+        if (-not $headerLine) { return }
+        
+        $headers = [regex]::Matches($headerLine, '(?<name>\S+(?:\s\S+)*)\s*')
+        foreach ($line in ($lines | Where-Object { $_ -match '^[a-zA-Z0-9].*\s{2,}' } | Select-Object -Skip 1)) {
+            $obj = New-Object PSObject
+            foreach ($h in $headers) {
+                $val = if ($h.Index + $h.Length -le $line.Length) {
+                    $line.Substring($h.Index, $h.Length).Trim()
+                } else {
+                    $line.Substring($h.Index).Trim()
+                }
+                $obj | Add-Member -MemberType NoteProperty -Name $h.Groups['name'].Value -Value $val
+            }
+            $obj
+        }
+    }
+}
+
+function Show-JsonVisual {
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$Path
+    )
+
+    try {
+        $fullPath = Resolve-Path $Path
+        $data = Get-Content $fullPath -Raw | ConvertFrom-Json
+    } catch {
+        Write-Host " ❌ Error: The file is not a valid JSON or does not exist." -ForegroundColor Red
+        return
+    }
+
+    Write-Host "`n 󰘦  Visualizing: $(Split-Path $fullPath -Leaf)" -ForegroundColor Magenta
+    Write-Host " ──────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+    function Invoke-DrawNode {
+        param($Object, $Indent = "")
+
+        if ($Object -is [PSCustomObject] -or $Object -is [System.Collections.IDictionary]) {
+            $properties = $Object | Get-Member -MemberType NoteProperty, Property
+            $count = $properties.Count
+            $i = 0
+
+            foreach ($p in $properties) {
+                $i++
+                $isLast = ($i -eq $count)
+
+                $connector = if ($isLast) { " └── " } else { " ├── " }
+                $space = if ($isLast) { "     " } else { " │   " }
+                $nextIndent = $Indent + $space
+
+                Write-Host "$Indent$connector" -NoNewline -ForegroundColor DarkGray
+                Write-Host "$($p.Name): " -NoNewline -ForegroundColor Cyan
+                
+                $val = $Object.$($p.Name)
+                if ($val -is [PSCustomObject] -or $val -is [Array]) {
+                    Write-Host "󰅂" -ForegroundColor DarkGray
+                    Invoke-DrawNode -Object $val -Indent $nextIndent
+                } else {
+                    Write-Host $val -ForegroundColor White
+                }
+            }
+        }
+        elseif ($Object -is [Array]) {
+            $count = $Object.Count
+            for ($j=0; $j -lt $count; $j++) {
+                $isLast = ($j -eq $count -1)
+                
+                $connector = if ($isLast) { " └── " } else { " ├── " }
+                $space = if ($isLast) { "     " } else { " │   " }
+                $nextIndent = $Indent + $space
+
+                Write-Host "$Indent$connector" -NoNewline -ForegroundColor DarkGray
+                Write-Host "[$j] " -NoNewline -ForegroundColor Yellow
+                
+                $item = $Object[$j]
+                if ($item -is [PSCustomObject] -or $item -is [Array]) {
+                    Write-Host "󰅂" -ForegroundColor DarkGray
+                    Invoke-DrawNode -Object $item -Indent $nextIndent
+                } else {
+                    Write-Host $item -ForegroundColor White
+                }
+            }
+        }
+    }
+
+    Invoke-DrawNode -Object $data
+    Write-Host " ──────────────────────────────────────────────────`n" -ForegroundColor DarkGray
+}
+
+function Show-LogVisual {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    if (!(Test-Path $Path)) { Write-Host " ❌ File not found." -ForegroundColor Red; return }
+
+    Write-Host "`n   Reading Log: $(Split-Path $Path -Leaf)" -ForegroundColor Magenta
+    Write-Host " ──────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+    Get-Content $Path | ForEach-Object {
+        $line = $_
+        if ($line -match "ERROR|Critical|Failed") { Write-Host $line -ForegroundColor Red }
+        elseif ($line -match "WARN|Warning") { Write-Host $line -ForegroundColor Yellow }
+        elseif ($line -match "INFO|Success") { Write-Host $line -ForegroundColor Cyan }
+        else { Write-Host $line -ForegroundColor Gray }
+    }
+    Write-Host " ──────────────────────────────────────────────────`n" -ForegroundColor DarkGray
+}
+
+function Show-CsvVisual {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    try {
+        $fullPath = Resolve-Path $Path
+        $data = Import-Csv $fullPath
+        $count = ($data | Measure-Object).Count
+
+        Write-Host "`n   CSV Data: $(Split-Path $fullPath -Leaf) ($count registros)" -ForegroundColor Cyan
+        
+        if ($count -gt 50) {
+            Write-Host " 󰆼  Launching standalone browser..." -ForegroundColor DarkGray
+            Start-Process powershell -ArgumentList "-NoProfile -Command `"Import-Csv '$fullPath' | Out-GridView -Title 'CSV Explorer: $(Split-Path $fullPath -Leaf)'`"" -WindowStyle Hidden
+            
+            Write-Host " ✅ Open browser. Free terminal." -ForegroundColor Green
+        } else {
+            $data | Format-Table -AutoSize
+        }
+    } catch {
+        Write-Host " ❌ Error reading CSV. Check the delimiter." -ForegroundColor Red
+    }
+}
+
+function Show-ProcessVisual {
+    Write-Host "`n   Active Process Monitor" -ForegroundColor Magenta
+    Write-Host " ──────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+    Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 | ForEach-Object {
+        $mem = [Math]::Round($_.WorkingSet / 1MB, 2)
+        $cpu = [Math]::Round($_.CPU, 1)
+
+        $color = "White"
+        if ($mem -gt 500) { $color = "Yellow" }
+        if ($mem -gt 1000) { $color = "Red" }
+
+        Write-Host "  " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$($_.Name.PadRight(25))" -NoNewline -ForegroundColor Cyan
+        Write-Host "   $($cpu.ToString().PadLeft(6)) s" -NoNewline -ForegroundColor Gray
+        Write-Host " 󰍛  $($mem.ToString().PadLeft(8)) MB" -ForegroundColor $color
+    }
+    Write-Host " ──────────────────────────────────────────────────`n" -ForegroundColor DarkGray
 }
 
 # ========================================================================
@@ -889,6 +1454,17 @@ Set-Alias help help-system
 Set-Alias w get-weather-full
 Set-Alias ed edit-fast
 Set-Alias hix history-exec
+Set-Alias whereis Get-InstallMethod
+Set-Alias wup Check-WingetVisual
+Set-Alias jv Show-JsonVisual
+Set-Alias cv Show-CsvVisual
+Set-Alias lv Show-LogVisual
+Set-Alias pv Show-ProcessVisual
+Set-Alias zap Invoke-Zap
+Set-Alias find Invoke-QuickSearch
+Set-Alias kill Invoke-KillProcess
+Set-Alias gs Get-GitStatusSummary
+Set-Alias newp New-Project
 
 # ========================================================================
 # 6. Execute in Start and Exit
