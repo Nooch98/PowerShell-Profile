@@ -691,6 +691,7 @@ function Get-RepoStats {
             @{ Icon = "🍴"; Label = "Forks       "; Value = $mainInfo.forks_count; Color = "Blue" }
             @{ Icon = "🐞"; Label = "Open Issues "; Value = $actualIssues; Color = "Red" }
             @{ Icon = "🔀"; Label = "Open PRs    "; Value = $prCount; Color = "Green" }
+            @{ Icon = "👥"; Label = "Clones (14d)"; Value = "$($trafficClones.count) ($($trafficClones.uniques) unique)"; Color = "Magenta"}
             @{ Icon = "👀"; Label = "Views (14d) "; Value = "$($trafficViews.count) ($($trafficViews.uniques) unique)"; Color = "Green" }
             @{ Icon = "📅"; Label = "Last Push   "; Value = $lastPush; Color = "Cyan" }
         )
