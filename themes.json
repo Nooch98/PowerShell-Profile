@@ -233,6 +233,29 @@
             "brightRed": "#eb6f92",
             "brightWhite": "#e0def4",
             "brightYellow": "#f6c177"
-          }
+          },
+          {
+            "background": "#1F2430",
+            "black": "#191E2A",
+            "blue": "#6300ff",
+            "brightBlack": "#cc11f0",
+            "brightBlue": "#d14eea",
+            "brightCyan": "#00b8ff",
+            "brightGreen": "#00ff9f",
+            "brightPurple": "#bd00ff",
+            "brightRed": "#ff008d",
+            "brightWhite": "#FFFFFF",
+            "brightYellow": "#FFD580",
+            "cursorColor": "#FFCC66",
+            "cyan": "#00b8ff",
+            "foreground": "#CBCCC6",
+            "green": "#00ff9f",
+            "name": "Ayu Mirage Custom",
+            "purple": "#bd00ff",
+            "red": "#d600ff", 
+            "selectionBackground": "#33415E",
+            "white": "#C7C7C7",
+            "yellow": "#f96363"
+        }
     ],
 }
