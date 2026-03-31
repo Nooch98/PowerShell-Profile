@@ -1621,7 +1621,8 @@ function help-system {
         @{ A="kill";    C="Invoke-KillProc";   D="Sniper: Select and kill process via FZF" },
         @{ A="rmmodf";  C="Remove-ModuleFzf";  D="FZF Uninstaller: Select & Remove Modules" },
         @{ A="ed";      C="edit-fast";         D="FZF Editor: Quick open files in Code" },
-        @{ A="whereis"; C="Get-InstallMeth";   D="Source: Find app installation path" }
+        @{ A="whereis"; C="Get-InstallMeth";   D="Source: Find app installation path" },
+        @{ A="keys";      C="Get-WezKeybinds";   D="CheatSheet: WezTerm navigation guide" }
     )
 
     Write-Host "`n  󰌌  GLOBAL HOTKEYS (FZF)" -ForegroundColor Magenta
