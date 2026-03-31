@@ -88,31 +88,135 @@ function la ($command) { eza.exe --icons -la}
 function lra ($command) { eza.exe --icons -lra}
 
 function up {
-    param([Parameter(Mandatory=$false)][int]$levels = 1)
-    $path = $pwd.Path
-    for ($i = 0; $i -lt $levels; $i++) {
-        $path = Split-Path $path -Parent
-        if ( -not $path) { Write-Warning "Already on root path"; return }
+    param(
+        [Parameter(Mandatory=$false)]
+        [int]$levels = 1
+    )
+
+    $currentPath = $pwd.Path
+    $targetPath = $currentPath
+
+    try {
+        for ($i = 0; $i -lt $levels; $i++) {
+            $parent = Split-Path $targetPath -Parent
+
+            if (-not $parent -or $targetPath -eq $parent) {
+                if ($targetPath -ne $currentPath) {
+                    Write-Host "  󱞊  Reached root directory: " -NoNewline -ForegroundColor DarkYellow
+                    Write-Host $targetPath -ForegroundColor White
+                } else {
+                    Write-Host "  󰀦  Already at root." -ForegroundColor DarkGray
+                }
+                break
+            }
+            $targetPath = $parent
+        }
+
+        if ($targetPath -ne $currentPath) {
+            Set-Location $targetPath
+
+            $relative = $targetPath.Split('\')[-1]
+            if (-not $relative) { $relative = $targetPath }
+            
+            Write-Host "  󰁝  Up $levels level(s) │ " -NoNewline -ForegroundColor Gray
+            Write-Host "Now in: $relative" -ForegroundColor Cyan
+        }
+
+    } catch {
+        Write-Host "  ❌ Error navigating upwards." -ForegroundColor Red
     }
-    Set-Location $path
 }
 
 function mcd {
-    param([Parameter(Mandatory=$true)][string]$Path)
-    New-Item -Path $Path -ItemType Directory | Out-Null
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -Path $Path)) {
+        New-Item -Path $Path -ItemType Directory -Force | Out-Null
+        Write-Host "  📁 Directory created: " -NoNewline -ForegroundColor Gray
+        Write-Host $Path -ForegroundColor Cyan
+    } else {
+        Write-Host "  📂 Directory already exists, switching..." -ForegroundColor DarkGray
+    }
+
     Set-Location -Path $Path
 }
 
 function uptime {
     $os = Get-CimInstance Win32_OperatingSystem
-    $uptime = (Get-Date) - $os.LastBootUpTime
-    Write-Host " 󱑍 Last Reboot: " -NoNewline; Write-Host $os.LastBootUpTime -ForegroundColor Cyan
-    Write-Output "   Uptime: $($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
+    $bootTime = $os.LastBootUpTime
+    $uptime = (Get-Date) - $bootTime
+
+    $parts = @()
+    if ($uptime.Days -gt 0)    { $parts += "$($uptime.Days)d" }
+    if ($uptime.Hours -gt 0)   { $parts += "$($uptime.Hours)h" }
+    if ($uptime.Minutes -gt 0) { $parts += "$($uptime.Minutes)m" }
+    if ($parts.Count -eq 0)    { $parts += "$($uptime.Seconds)s" }
+    
+    $uptimeString = $parts -join " "
+
+    $color = "Green"
+    if ($uptime.Days -gt 7)  { $color = "Yellow" }
+    if ($uptime.Days -gt 30) { $color = "Red" }
+
+    Write-Host "`n  󱑍  SYSTEM UPTIME" -ForegroundColor Magenta
+    Write-Host "  " + ("─" * 40) -ForegroundColor DarkGray
+    
+    Write-Host "  Last Reboot : " -NoNewline -ForegroundColor Gray
+    Write-Host "$($bootTime.ToString('f'))" -ForegroundColor Cyan
+    
+    Write-Host "  Active for  : " -NoNewline -ForegroundColor Gray
+    Write-Host $uptimeString -ForegroundColor $color
+    
+    Write-Host ""
 }
 
 function diskinfo {
-    Get-CimInstance -ClassName Win32_LogicalDisk |
-    Select-Object DeviceID, VolumeName, @{Name="Size (GB)"; Expression={"{0:N2}" -f ($_.Size / 1GB)}}, @{Name="Free (GB)"; Expression={"{0:N2}" -f ($_.FreeSpace / 1GB)}}, FileSystem
+    Write-Host "`n  󰋊  STORAGE OVERVIEW" -ForegroundColor Magenta
+    Write-Host "  ================================================================" -ForegroundColor DarkGray
+
+    $disks = Get-CimInstance -ClassName Win32_LogicalDisk | Where-Object { $_.Size -gt 0 } | ForEach-Object {
+        $sizeGB = [Math]::Round($_.Size / 1GB, 2)
+        $freeGB = [Math]::Round($_.FreeSpace / 1GB, 2)
+        $usedGB = [Math]::Round($sizeGB - $freeGB, 2) # Forzamos redondeo aquí
+        $percentUsed = [Math]::Round(($usedGB / $sizeGB) * 100, 1)
+
+        $color = "Green"
+        if ($percentUsed -gt 75) { $color = "Yellow" }
+        if ($percentUsed -gt 90) { $color = "Red" }
+
+        $barLength = 10
+        $filled = [int][Math]::Floor($percentUsed / 10)
+        $bar = ("#" * $filled) + ("." * ($barLength - $filled))
+
+        [PSCustomObject]@{
+            Drive    = $_.DeviceID
+            Label    = if ($_.VolumeName) { $_.VolumeName } else { "Local Disk" }
+            Total    = $sizeGB
+            Used     = $usedGB
+            Free     = $freeGB
+            Usage    = "$percentUsed%"
+            Status   = "[$bar]"
+            _Color   = $color
+        }
+    }
+
+    $hdr = "  {0,-6} {1,-15} {2,10} {3,10} {4,10}   {5,-12}" -f "DRIVE", "LABEL", "TOTAL", "USED", "FREE", "HEALTH"
+    Write-Host $hdr -ForegroundColor Cyan
+    Write-Host "  $("-" * 72)" -ForegroundColor DarkGray
+
+    foreach ($d in $disks) {
+        $t = "{0:N2}" -f $d.Total
+        $u = "{0:N2}" -f $d.Used
+        $f = "{0:N2}" -f $d.Free
+        
+        $line = "  {0,-6} {1,-15} {2,10} {3,10} {4,10}   " -f $d.Drive, $d.Label, $t, $u, $f
+        Write-Host $line -NoNewline
+        Write-Host "$($d.Status) $($d.Usage)" -ForegroundColor $d._Color
+    }
+    Write-Host ""
 }
 
 function reload { 
@@ -130,40 +234,49 @@ function Update-PowerShell {
     if (-not $global:canConnectToGithub) { return }
 
     try {
-        Write-Host "  󰚰  Checking for PowerShell Preview updates..." -ForegroundColor Gray
-         
+        Write-Host "`n  󰚰  Checking for PowerShell Preview updates..." -ForegroundColor Gray
+
         $currentVersion = $PSVersionTable.PSVersion
         $gitHubApiUrl = "https://api.github.com/repos/PowerShell/PowerShell/releases"
 
-        $allReleases = Invoke-RestMethod -Uri $gitHubApiUrl -UserAgent "PostmanRuntime/7.28.4" -ErrorAction SilentlyContinue
+        $headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" }
+        $allReleases = Invoke-RestMethod -Uri $gitHubApiUrl -Headers $headers -ErrorAction SilentlyContinue
         
         if ($null -eq $allReleases) {
-            Write-Host "  󰅚  Update check failed (GitHub API unreachable)" -ForegroundColor DarkYellow
+            Write-Host "  󰅚  GitHub API unreachable or Rate Limited." -ForegroundColor DarkYellow
             return
         }
 
         $latestPreview = $allReleases | Where-Object { $_.prerelease -eq $true } | Select-Object -First 1
         $tag = $latestPreview.tag_name
+        $regex = '\d+(\.\d+)+'
+        $cleanLatest = ([regex]::Match($tag, $regex)).Value
+        $cleanCurrent = ([regex]::Match($currentVersion.ToString(), $regex)).Value
 
-        $cleanLatest = $tag.TrimStart('v') -replace "-preview\.", "."
-        $latestVerObj = [version]$cleanLatest
+        if ($tag -match "-preview\.(\d+)") { $cleanLatest += ".$($Matches[1])" }
+        if ($currentVersion.ToString() -match "-preview\.(\d+)") { $cleanCurrent += ".$($Matches[1])" }
 
-        $cleanCurrent = $currentVersion.ToString() -replace "-preview\.", "."
-        $currentVerObj = [version]$cleanCurrent
-
-        if ($currentVerObj -lt $latestVerObj) {
-            Write-Host "  󱧘  New Preview available: $tag" -ForegroundColor Magenta
-            Write-Host "  󰇚  Updating via WinGet (Preview Channel)..." -ForegroundColor Cyan
-
-            winget update --id Microsoft.PowerShell.Preview --silent --accept-source-agreements --accept-package-agreements
+        if ([version]$cleanLatest -gt [version]$cleanCurrent) {
+            Write-Host "  󱧘  New Preview available: " -NoNewline -ForegroundColor Magenta
+            Write-Host $tag -ForegroundColor White
             
-            Write-Host "  󰠄  Update complete. Please restart your terminal." -ForegroundColor Green
+            Write-Host "  󰇚  Updating via WinGet..." -ForegroundColor Cyan
+
+            $updateResult = winget update --id Microsoft.PowerShell.Preview --silent --accept-source-agreements --accept-package-agreements 2>&1
+            
+            if ($lastExitCode -eq 0) {
+                Write-Host "  󰄬  Update complete! Please restart your terminal." -ForegroundColor Green
+            } else {
+                Write-Host "  󰅚  WinGet couldn't complete the update automatically." -ForegroundColor Red
+            }
         } else {
-            Write-Host "  󰄬  PowerShell Preview is up to date ($tag)" -ForegroundColor DarkGray
+            Write-Host "  󰄬  PowerShell Preview is up to date (" -NoNewline -ForegroundColor DarkGray
+            Write-Host $tag -NoNewline -ForegroundColor Gray
+            Write-Host ")" -ForegroundColor DarkGray
         }
 
     } catch {
-        Write-Host "  󰅚  Could not complete update check." -ForegroundColor DarkRed
+        Write-Host "  󰅚  Error during update check: $($_.Exception.Message)" -ForegroundColor DarkRed
     }
 }
 
@@ -174,34 +287,126 @@ function Invoke-Fzf {
 
 function activate {
     param([string]$Name = "")
-    if ($Name) { $path = Get-ChildItem -Path ".\$Name\Scripts\activate.ps1" -ErrorAction SilentlyContinue}
-    else { $path = Get-ChildItem -Path ".\venv\Scripts\activate.ps1", ".\.venv\Scripts\activate.ps1" -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    if ($path) {
-        Write-Host "Activating virtual env: $($path.Directory.Parent.Name)..." -ForegroundColor Blue
-        & $path.FullName
-        Write-Host "Env activated. You can press Ctrl+l for clean" -ForegroundColor Green
-    } else { Write-Host "Any virtual env found (venv, .venv, o $Name) in the actual path" -ForegroundColor Red}
+
+    $found = $null
+
+    $venvNames = if ($Name) { @($Name) } else { @("venv", ".venv", "env", ".env", "app") }
+    $subPaths  = @("Scripts\activate.ps1", "bin\activate.ps1")
+
+    Write-Host "`n  🐍 Searching for Python Virtual Environment..." -ForegroundColor Gray
+
+    foreach ($vName in $venvNames) {
+        foreach ($sPath in $subPaths) {
+            $testPath = Join-Path (Get-Location) "$vName\$sPath"
+            if (Test-Path $testPath) {
+                $found = Get-Item $testPath
+                break
+            }
+        }
+        if ($found) { break }
+    }
+
+    if ($found) {
+        $envName = $found.Directory.Parent.Name
+        Write-Host "  󱔎  Activating: " -NoNewline -ForegroundColor Blue
+        Write-Host "$envName" -ForegroundColor White
+
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+
+        & $found.FullName
+
+        Write-Host "  󰄬  Environment ready." -ForegroundColor Green
+        Write-Host "  󰌑  Tip: Use 'deactivate' to exit or 'Ctrl+L' to clear." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  ❌ No virtual environment found " -NoNewline -ForegroundColor Red
+        if ($Name) { Write-Host "with name '$Name'" -ForegroundColor Yellow } 
+        else { Write-Host "(tried venv, .venv, env, .env)" -ForegroundColor DarkGray }
+    }
+    Write-Host ""
 }
 
 function Select-Fzf { $input | fzf --reverse --height 50% --border --prompt='Select > ' | Out-String}
 
 function Remove-ModuleFzf {
-    Write-Host "Select the modules to uninstall (Ctrl+Space to select)" -ForegroundColor Yellow
-    $modules = Get-InstalledModule | Select-Object -ExpandProperty Name
-    $selectModules = $modules | fzf --multi --reverse --border --prompt='Modules to uninstall > '
-    if ($selectModules) {
-        foreach ($ModuleName in $selectModules -split "`n") {
-            Write-Host "Uninstalling $ModuleName..." -ForegroundColor Cyan; Uninstall-Module -Name $ModuleName -Force -ErrorAction Stop
+    Write-Host "`n  󰆧  MODULE UNINSTALLER (fzf-powered)" -ForegroundColor Magenta
+    Write-Host "  " + ("─" * 45) -ForegroundColor DarkGray
+    Write-Host "  (Tab/Ctrl+Space to select multiple, Enter to confirm)`n" -ForegroundColor Gray
+
+    $modules = Get-Module -ListAvailable | 
+               Select-Object Name, Version, Author -Unique | 
+               ForEach-Object { "$($_.Name) | v$($_.Version) | by $($_.Author)" }
+
+    if (-not $modules) { 
+        Write-Host "  ❌ No modules found." -ForegroundColor Red
+        return 
+    }
+
+    $selection = $modules | fzf --multi `
+        --reverse `
+        --header='[Tab: Select | Enter: Uninstall | Esc: Cancel]' `
+        --prompt='󰄭 Modules to Remove > ' `
+        --border='rounded' `
+        --color='hl:176,hl+:176,pointer:208,marker:168'
+
+    if ($selection) {
+        foreach ($item in $selection) {
+            $moduleName = $item.Split('|')[0].Trim()
+            
+            Write-Host "  󰚃  Uninstalling: " -NoNewline -ForegroundColor Cyan
+            Write-Host $moduleName -ForegroundColor White
+
+            try {
+                Uninstall-Module -Name $moduleName -Force -ErrorAction Stop
+                Write-Host "  󰄬  Done." -ForegroundColor Green
+            } catch {
+                Write-Host "  󰅚  Failed: " -NoNewline -ForegroundColor Red
+                Write-Host $_.Exception.Message -ForegroundColor DarkGray
+
+                if ($_.Exception.Message -match "in use") {
+                    Write-Host "      Tip: Try 'Remove-Module $moduleName' first to unload it." -ForegroundColor DarkYellow
+                }
+            }
         }
-        Write-Host "Uninstall complete. Reload your shell." -ForegroundColor Green
-    } else { Write-Host "Operation canceled." -ForegroundColor Red}
+        Write-Host "`n  󰠄  Process finished. Restart shell for a clean state.`n" -ForegroundColor DarkGray
+    } else {
+        Write-Host "  󰜺  Operation canceled." -ForegroundColor DarkYellow
+    }
 }
 
 function find-command {
     param([string]$query = "")
-    Get-Content $PROFILE | 
-        Where-Object { $_ -match "function\s+\w+|Set-Alias" } | 
-        fzf --reverse --header "My Shortcuts & Functions" --height 40%
+
+    Write-Host "`n  🔍  POWERSHELL COMMAND PALETTE" -ForegroundColor Magenta
+    Write-Host "  " + ("─" * 45) -ForegroundColor DarkGray
+    Write-Host "  (Enter: Execute | Esc: Cancel)`n" -ForegroundColor Gray
+
+    $commands = Get-Command -CommandType Function, Alias | 
+                Where-Object { $_.Source -match "Microsoft.PowerShell_profile.ps1" -or $_.Name -match $query } |
+                Select-Object @{Name="Type"; Expression={$_.CommandType}}, Name, Definition |
+                ForEach-Object { "$($_.Type.ToString().ToUpper().PadRight(8)) │ $($_.Name)" }
+
+    if (-not $commands) {
+        Write-Host "  ❌ No custom commands found." -ForegroundColor Red
+        return
+    }
+
+    $selection = $commands | fzf --reverse `
+        --header='[Enter: Run | Ctrl+C: Copy Name | Esc: Exit]' `
+        --prompt='󰍉 Search Tool > ' `
+        --height=50% `
+        --border='sharp' `
+        --color='hl:176,hl+:176,pointer:208,marker:168'
+
+    if ($selection) {
+        $cmdName = $selection.Split('│')[1].Trim()
+
+        Write-Host "`n  🚀 Executing: " -NoNewline -ForegroundColor Cyan
+        Write-Host $cmdName -ForegroundColor White
+        Write-Host "  " + ("─" * 20) -ForegroundColor DarkGray -BackgroundColor Black
+        Invoke-Expression $cmdName
+    } else {
+        Write-Host "  󰜺  Selection canceled." -ForegroundColor DarkYellow
+    }
 }
 
 function sql {
@@ -249,13 +454,83 @@ function Update-Scoop {
 }
 
 function Update-Winget {
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        Write-Host "🛠️ Starting Winget update..." -ForegroundColor Cyan
-        winget upgrade --all --silent
-        Write-Host "✅ Winget update completed." -ForegroundColor Green
-    } else {
-        Write-Host "⚠️ Winget is not installed. The update cannot be run." -ForegroundColor Yellow
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "`n  ⚠️  Winget not found. Aborting." -ForegroundColor Yellow
+        return
     }
+
+    Write-Host "`n  󰚰  WINGET PRECISE UPDATE" -ForegroundColor Magenta
+    Write-Host ("  " + ("─" * 75)) -ForegroundColor DarkGray
+    Write-Host "  󱑤  Scanning for pending updates..." -ForegroundColor Gray -NoNewline
+
+    $raw = winget upgrade | Where-Object { $_ -match '\S' -and $_ -notmatch 'Loading|Cargando' }
+    $headerLine = ""
+    $dataStart = 0
+    for ($i = 0; $i -lt $raw.Count; $i++) {
+        if ($raw[$i] -match '^-+$') { 
+            $headerLine = $raw[$i-1]
+            $dataStart = $i + 1
+            break 
+        }
+    }
+
+    if ($dataStart -eq 0) {
+        Write-Host "`r  ✅  System up to date! No pending packages.          " -ForegroundColor Green
+        return
+    }
+
+    $posId = $headerLine.IndexOf("Id")
+    if ($posId -lt 0) { $posId = $headerLine.IndexOf("ID") }
+    $posVersion = $headerLine.IndexOf("Versi")
+    if ($posVersion -lt 0) { $posVersion = $headerLine.IndexOf("Version") }
+
+    $packages = $raw | Select-Object -Skip $dataStart | ForEach-Object {
+        $line = $_
+        if ($line.Length -gt $posVersion) {
+            $id = $line.Substring($posId, ($posVersion - $posId)).Trim()
+            if ($id -and $id -notmatch "updates available|actualizaciones") { $id }
+        }
+    }
+
+    $total = $packages.Count
+    if ($total -eq 0) {
+        Write-Host "`r  ✅  No action required.                                " -ForegroundColor Green
+        return
+    }
+
+    Write-Host "`r  🚀  Processing $total updates...                     " -ForegroundColor Cyan
+
+    $current = 1
+    foreach ($id in $packages) {
+        $percent = [Math]::Round(($current / $total) * 100)
+        $barLength = 20
+        $done = [Math]::Round(($current / $total) * $barLength)
+        $bar = ("█" * $done) + ("░" * ($barLength - $done))
+        
+        $cleanId = $id -replace '…', '*'
+        $displayId = if ($cleanId.Length -gt 25) { $cleanId.Substring(0, 22) + "..." } else { $cleanId }
+
+        $statusMsg = "  [$bar] $($percent)% │ Updating: $($displayId.PadRight(25)) | ($current / $total)"
+        Write-Host "`r$statusMsg" -NoNewline -ForegroundColor Yellow
+
+        $process = Start-Process winget -ArgumentList "upgrade", "--id", "`"$cleanId`"", "--silent", "--accept-package-agreements", "--accept-source-agreements" `
+            -NoNewWindow -Wait -PassThru -RedirectStandardOutput $env:TEMP\winget-log.txt -RedirectStandardError $env:TEMP\winget-err.txt
+
+        if ($process.ExitCode -eq 0) {
+            $successMsg = "  [$bar] $($percent)% │ Finished: $($displayId.PadRight(25)) | ($current / $total)"
+            Write-Host "`r$successMsg" -NoNewline -ForegroundColor Green
+        } else {
+            $errorMsg = "  [$bar] $($percent)% │ Failed:   $($displayId.PadRight(25)) | ($current / $total)"
+            Write-Host "`r$errorMsg" -NoNewline -ForegroundColor Red
+            Start-Sleep -Milliseconds 500
+        }
+        
+        $current++
+    }
+
+    Write-Host "`n  ✨  All updates processed successfully." -ForegroundColor Magenta
+    Write-Host ("  " + ("─" * 75)) -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 function Update-Choco {
@@ -271,53 +546,76 @@ function Update-Choco {
 function Get-InstallMethod {
     param([Parameter(Mandatory=$true)] [string]$AppName)
 
-    Write-Host " 🔍 Searching installation source for: '$AppName'..." -ForegroundColor Gray
+    Write-Host "`n  🔍 Searching installation source for: " -NoNewline -ForegroundColor Gray
+    Write-Host "'$AppName'..." -ForegroundColor Cyan
+    Write-Host "  " + ("─" * 45) -ForegroundColor DarkGray
+    
     $found = $false
 
     if (Get-Command scoop -ErrorAction SilentlyContinue) {
-        $scoopCheck = scoop list $AppName | Select-String $AppName
+        $scoopCheck = scoop list | Where-Object { $_.Name -match $AppName -or $_ -match $AppName }
         if ($scoopCheck) { 
-            Write-Host " 📦 [SCOOP]: Found '$AppName'. Uninstall with 'scoop uninstall $AppName'" -ForegroundColor Cyan
-            $found = $true
-        }
-    }
-
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        $wingetCheck = winget list --query $AppName | Select-String $AppName
-        if ($wingetCheck) {
-            Write-Host " 📦 [WINGET]: Found '$AppName'. Uninstall with 'winget uninstall $AppName'" -ForegroundColor Blue
-            $found = $true
-        }
-    }
-
-    if (Get-Command choco -ErrorAction SilentlyContinue) {
-        $chocoCheck = choco list --local-only $AppName | Select-String $AppName
-        if ($chocoCheck) {
-            Write-Host " 📦 [CHOCO]: Found '$AppName'. Uninstall with 'choco uninstall $AppName'" -ForegroundColor Green
-            $found = $true
-        }
-    }
-
-    if (-not $found) {
-        $regPaths = @(
-            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
-            "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
-        )
-        $regCheck = Get-ItemProperty $regPaths | Where-Object { $_.DisplayName -match $AppName } | Select-Object DisplayName, DisplayVersion
-        
-        if ($regCheck) {
-            foreach ($app in $regCheck) {
-                Write-Host " 🖥️  [NORMAL EXE]: Found '$($app.DisplayName)' (v$($app.DisplayVersion))" -ForegroundColor Yellow
-                Write-Host "    Use Control Panel or 'Apps & Features' to manage it." -ForegroundColor DarkGray
+            foreach ($app in $scoopCheck) {
+                $name = if ($app.Name) { $app.Name } else { $app.ToString().Split(' ')[0] }
+                Write-Host "  📦 [SCOOP]  │ " -NoNewline -ForegroundColor Cyan
+                Write-Host "Found: $name" -ForegroundColor White
+                Write-Host "             Uninstall: scoop uninstall $name" -ForegroundColor DarkGray
             }
             $found = $true
         }
     }
 
-    if (-not $found) {
-        Write-Host " ❌ No installation found for '$AppName' in known managers or registry." -ForegroundColor Red
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        $wingetCheck = winget list --name $AppName --accept-source-agreements -e 2>$null | Select-String $AppName
+        if ($wingetCheck) {
+            Write-Host "  📦 [WINGET] │ " -NoNewline -ForegroundColor Blue
+            Write-Host "Found matches in Winget repository." -ForegroundColor White
+            Write-Host "             Uninstall: winget uninstall `"$AppName`"" -ForegroundColor DarkGray
+            $found = $true
+        }
     }
+
+    if (Get-Command choco -ErrorAction SilentlyContinue) {
+        $chocoCheck = choco list -lo -r | Where-Object { $_ -match $AppName }
+        
+        if ($chocoCheck) {
+            foreach ($line in $chocoCheck) {
+                $cName = $line.Split('|')[0]
+                Write-Host "  📦 [CHOCO]  │ " -NoNewline -ForegroundColor Green
+                Write-Host "Found: $cName" -ForegroundColor White
+                Write-Host "             Uninstall: choco uninstall $cName" -ForegroundColor DarkGray
+                $found = $true
+            }
+        }
+    }
+
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    $regCheck = Get-ItemProperty $regPaths -ErrorAction SilentlyContinue | 
+                Where-Object { $_.DisplayName -match $AppName -or $_.PSChildName -match $AppName } | 
+                Select-Object DisplayName, DisplayVersion, UninstallString
+
+    if ($regCheck) {
+        foreach ($app in $regCheck) {
+            $name = if ($app.DisplayName) { $app.DisplayName } else { "Unknown (Registry ID: $($app.PSChildName))" }
+            Write-Host "  🖥️  [REGEDIT] │ " -NoNewline -ForegroundColor Yellow
+            Write-Host "Found: $name (v$($app.DisplayVersion))" -ForegroundColor White
+            
+            if ($app.UninstallString) {
+                Write-Host "             Silent/Manual Uninstall: $($app.UninstallString)" -ForegroundColor DarkGray
+            }
+        }
+        $found = $true
+    }
+
+    if (-not $found) {
+        Write-Host "  ❌ No installation found for '$AppName' in any manager." -ForegroundColor Red
+    }
+    Write-Host ""
 }
 
 # ========================================================================
@@ -399,50 +697,125 @@ function Get-NetworkPorts {
     Write-Host "`n  󱘖  LISTENING NETWORK PORTS" -ForegroundColor Magenta
     Write-Host "  ================================================================" -ForegroundColor DarkGray
 
-    $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
-        $proc = Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue
-        [PSCustomObject]@{
-            Port     = $_.LocalPort
-            Process  = if ($proc) { $proc.ProcessName } else { "Unknown" }
-            PID      = $_.OwningProcess
-            Protocol = $_.AppliedSetting 
+    $tablaProcesos = @{}
+    Get-Process -ErrorAction SilentlyContinue | ForEach-Object { $tablaProcesos[$_.Id] = $_.ProcessName }
+    $tablaProcesos[0] = "Idle"
+    $tablaProcesos[4] = "System"
+    $lineasNetstat = netstat -ano | Select-String "LISTENING"
+    $listaResultados = foreach ($linea in $lineasNetstat) {
+        $partes = $linea.ToString().Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
+        if ($partes.Count -ge 4) {
+            $idEncontrado = [int]$partes[$partes.Count - 1]
+            $puertoNum    = [int]($partes[1].Split(':')[-1])
+            $nombreProc   = if ($tablaProcesos.ContainsKey($idEncontrado)) { $tablaProcesos[$idEncontrado] } else { "Protected/Unknown" }
+
+            $tipoEtiqueta = switch ($puertoNum) {
+                { $_ -in 80, 443, 8080, 3000, 5000, 5173 } { "󰖟 Web" }
+                { $_ -in 3306, 5432, 27017, 6379 } { "󰆼 DB" }
+                { $_ -in 22, 21, 3389, 135, 445, 139 } { "󰒍 System" }
+                Default { "󱄙 Service" }
+            }
+
+            [PSCustomObject]@{
+                PortNum   = $puertoNum
+                TypeStr   = $tipoEtiqueta
+                ProcName  = $nombreProc
+                ActualPID = $idEncontrado
+            }
         }
-    } | Sort-Object Port -Unique
-
-    Write-Host "    PORT".PadRight(10) + "PROCESS".PadRight(25) + "PID".PadRight(10) -ForegroundColor Cyan
-    Write-Host "    ----".PadRight(10) + "-------".PadRight(25) + "---".PadRight(10) -ForegroundColor DarkGray
-
-    foreach ($p in $ports) {
-        $color = "White"
-        if ($p.Port -in @(80, 443, 3000, 5000, 8080, 8443)) { $color = "Yellow" }
-        if ($p.Port -eq 5432 -or $p.Port -eq 3306) { $color = "Cyan" }
-
-        $portStr = "    $($p.Port)".PadRight(10)
-        $procStr = "$($p.Process)".PadRight(25)
-        $pidStr  = "$($p.PID)".PadRight(10)
-
-        Write-Host $portStr -ForegroundColor $color -NoNewline
-        Write-Host "│ " -ForegroundColor DarkGray -NoNewline
-        Write-Host $procStr -ForegroundColor White -NoNewline
-        Write-Host "│ " -ForegroundColor DarkGray -NoNewline
-        Write-Host $pidStr -ForegroundColor Gray
     }
-    Write-Host "`n  Total active listeners: $($ports.Count)`n" -ForegroundColor DarkGray
+
+    $puertosUnicos = $listaResultados | Sort-Object PortNum -Unique
+    $col1 = "    PORT".PadRight(10)
+    $col2 = "TYPE".PadRight(16)
+    $col3 = "PROCESS".PadRight(28)
+    Write-Host "$col1$col2│ $col3│ PID" -ForegroundColor Cyan
+    Write-Host "    $("-" * 65)" -ForegroundColor DarkGray
+
+    foreach ($p in $puertosUnicos) {
+        $colorPuerto = switch ($p.PortNum) {
+            { $_ -in 80, 443, 3000, 5000, 5173 } { "Yellow" }
+            { $_ -in 3306, 5432 } { "Cyan" }
+            { $_ -in 135, 445, 139 } { "DarkYellow" }
+            Default { "White" }
+        }
+
+        $txtP = "    $($p.PortNum)".PadRight(12)
+        $txtT = "$($p.TypeStr)".PadRight(16)
+        $txtN = "$($p.ProcName)".PadRight(26)
+        $txtI = "$($p.ActualPID)"
+
+        Write-Host $txtP -ForegroundColor $colorPuerto -NoNewline
+        Write-Host $txtT -ForegroundColor DarkGray -NoNewline
+        Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+        Write-Host $txtN -ForegroundColor White -NoNewline
+        Write-Host "│ " -ForegroundColor DarkGray -NoNewline
+        Write-Host $txtI -ForegroundColor Gray
+    }
+
+    Write-Host "`n  󰚰  Total active listeners: $($puertosUnicos.Count)`n" -ForegroundColor DarkGray
 }
 
 function Set-ExtractFile {
-    param([Parameter(Mandatory=$true)][string]$file)
-    if (Test-Path $file) {
-        $ext = (Get-Item $file).Extension.ToLower()
-        switch ($ext) {
-            ".zip"  { Expand-Archive $file -DestinationPath . }
-            ".tar"  { tar -xvf $file }
-            ".gz"   { tar -xvzf $file }
-            ".rar"  { unrar x $file }
-            ".7z"   { 7z x $file }
-            default { Write-Warning "Formato '$ext' no soportado." }
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$File
+    )
+
+    if (-not (Test-Path $File)) {
+        Write-Host "  ❌ File not found: $File" -ForegroundColor Red
+        return
+    }
+
+    $item = Get-Item $File
+    $ext = $item.Extension.ToLower()
+    $dest = Join-Path $pwd.Path $item.BaseName
+
+    Write-Host "`n  󰛫  Extracting: " -NoNewline -ForegroundColor Gray
+    Write-Host $item.Name -ForegroundColor Cyan
+    Write-Host "  " + ("─" * 45) -ForegroundColor DarkGray
+
+    if (-not (Test-Path $dest)) { New-Item -ItemType Directory -Path $dest | Out-Null }
+
+    switch ($ext) {
+        ".zip" { 
+            Expand-Archive -Path $item.FullName -DestinationPath $dest -Force 
+        }
+        
+        { $_ -in ".tar", ".gz", ".tgz" } { 
+            tar -xvf $item.FullName -C $dest 
+        }
+        
+        ".rar" { 
+            if (Get-Command unrar -ErrorAction SilentlyContinue) {
+                unrar x $item.FullName "$dest\"
+            } elseif (Get-Command 7z -ErrorAction SilentlyContinue) {
+                7z x $item.FullName "-o$dest"
+            } else {
+                Write-Host "  󰀦  Error: Install 'unrar' or '7zip' to extract .rar files." -ForegroundColor Yellow
+            }
+        }
+        
+        ".7z" { 
+            if (Get-Command 7z -ErrorAction SilentlyContinue) {
+                7z x $item.FullName "-o$dest"
+            } else {
+                Write-Host "  󰀦  Error: 7zip not found in PATH." -ForegroundColor Yellow
+            }
+        }
+
+        default { 
+            Write-Host "  󰅚  Unsupported format: $ext" -ForegroundColor Red
+            return
         }
     }
+
+    if ($LASTEXITCODE -eq 0 -or $?) {
+        Write-Host "  󰄬  Extraction complete!" -ForegroundColor Green
+        Write-Host "  📂 Destination: " -NoNewline -ForegroundColor Gray
+        Write-Host "./$($item.BaseName)/" -ForegroundColor White
+    }
+    Write-Host ""
 }
 
 function find-text {
@@ -525,57 +898,72 @@ function tasks {
         [Parameter(ValueFromRemainingArguments=$true)]
         [string]$task
     )
-    
+
     $todoFile = "$HOME\.todo.txt"
 
     if ($task) {
-        $task | Out-File -FilePath $todoFile -Append -Encoding utf8
-        Write-Host "  󰄲 Task added: $task" -ForegroundColor Green
+        $date = Get-Date -Format "dd/MM"
+        "[$date] $task" | Out-File -FilePath $todoFile -Append -Encoding utf8
+        Write-Host "  󰄲 Task added: " -NoNewline -ForegroundColor Green
+        Write-Host $task -ForegroundColor White
         return
     } 
 
     if (Test-Path $todoFile) {
         $content = Get-Content $todoFile | Where-Object { $_ -match '\S' }
-
-        Write-Host "`n  󰏫  CURRENT TASKS:" -ForegroundColor Magenta
-        Write-Host "  ------------------" -ForegroundColor DarkGray
-        
-        $i = 1
-        foreach ($line in $content) {
-            Write-Host "  $i. " -ForegroundColor DarkGray -NoNewline
-            Write-Host "󰄱 " -ForegroundColor Yellow -NoNewline
-            Write-Host " $line" -ForegroundColor White
-            $i++
+        if ($null -eq $content) { 
+            Remove-Item $todoFile
+            Write-Host "  󰚙  No pending tasks." -ForegroundColor DarkGray
+            return 
         }
-        
-        Write-Host "`n  [Enter] to manage/delete | [Ctrl+C] to exit" -ForegroundColor DarkGray
-        $null = Read-Host
 
-        $toRemove = $content | fzf --multi --reverse --header "SELECT TASKS TO DISCARD (Tab to mark, Enter to confirm)" --prompt="Finish > "
+        Write-Host "`n  󰏫  PENDING TASKS" -ForegroundColor Magenta
+        Write-Host "  " + ("─" * 20) -ForegroundColor DarkGray
+        
+        foreach ($line in $content) {
+            $color = if ($line -match "!") { "Yellow" } else { "White" }
+            Write-Host "  󰄱  " -NoNewline -ForegroundColor $color
+            Write-Host $line -ForegroundColor $color
+        }
+
+        $header = "TAB: Mark Multiple | ENTER: Finish/Delete | ESC: Exit"
+        $toRemove = $content | fzf --multi --reverse --header $header --prompt="Complete > " --height 40% --border
 
         if ($toRemove) {
             $newContent = $content | Where-Object { $_ -notin $toRemove }
-            
             if ($newContent) {
                 $newContent | Out-File -FilePath $todoFile -Encoding utf8
             } else {
                 Remove-Item $todoFile
             }
-            
-            Write-Host "  󰄭  $(($toRemove | Measure-Object).Count) tasks completed/removed!" -ForegroundColor Cyan
+
+            $count = ($toRemove | Measure-Object).Count
+            Write-Host "`n  󰄭  $count tasks completed! Well done." -ForegroundColor Cyan
+        } else {
+            Clear-Host
+            [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()
         }
     } else {
-        Write-Host "  󰚙  No pending tasks. You're free!" -ForegroundColor DarkGray
+        Write-Host "`n  󰚙  No pending tasks. You're free!" -ForegroundColor DarkGray
     }
 }
 
 function myip {
     $public = if ($global:canConnectToGithub) { curl.exe -s https://api.ipify.org } else { "Offline" }
+    $localIP = Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi", "Ethernet" -ErrorAction SilentlyContinue | 
+               Select-Object -First 1
+
+    $dns = Get-DnsClientServerAddress -AddressFamily IPv4 | 
+           Where-Object { $_.ServerAddresses -ne $null -and $_.InterfaceAlias -in @("Wi-Fi", "Ethernet") } | 
+           Select-Object -ExpandProperty ServerAddresses | 
+           Select-Object -First 1
+
     Write-Host "`n  󰩟 Network Info:" -ForegroundColor Magenta
-    Write-Host "  --------------" -ForegroundColor DarkGray
-    Write-Host "  Local IP  : " -NoNewline; Write-Host (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi", "Ethernet" | Select-Object -First 1).IPAddress -ForegroundColor Cyan
+    Write-Host "  --------------" -ForegroundColor DarkGray   
+    Write-Host "  Local IP  : " -NoNewline; Write-Host ($localIP.IPAddress ?? "Not Found") -ForegroundColor Cyan
     Write-Host "  Public IP : " -NoNewline; Write-Host $public -ForegroundColor Cyan
-    Write-Host "  DNS       : " -NoNewline; Write-Host (Get-DnsClientServerAddress -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses -First 1) -ForegroundColor Cyan
+    Write-Host "  DNS       : " -NoNewline; Write-Host ($dns -join ", " ?? "Not Configured") -ForegroundColor Cyan
+    Write-Host ""
 }
 
 function remind {
@@ -709,18 +1097,33 @@ function Get-RepoStats {
 }
 
 function Set-TerminalScheme {
-    $settingsPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
-    
-    if (-not (Test-Path $settingsPath)) {
-        Write-Host "❌ settings.json not found!" -ForegroundColor Red
+    $wtPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
+
+    if (-not (Test-Path $wtPath)) {
+        $wtPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"
+    }
+
+    if (-not (Test-Path $wtPath)) {
+        Write-Host "  ❌ settings.json not found!" -ForegroundColor Red
         return
     }
 
     try {
-        $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+        $rawJson = Get-Content $wtPath -Raw
+        $cleanJson = $rawJson -replace '(?m)^\s*//.*|(?m)\s//.*', ''
+        $settings = $cleanJson | ConvertFrom-Json
+        
         $schemes = $settings.schemes
+        if (-not $schemes) { 
+            Write-Host "  󰅚 No schemes defined in your settings.json" -ForegroundColor Yellow
+            return 
+        }
 
-        $selectedName = $schemes.name | fzf --reverse --height 40% --header "📺 SELECT TERMINAL SCHEME" --border
+        $selectedName = $schemes | ForEach-Object { "$($_.name.PadRight(20)) │ BG: $($_.background) FG: $($_.foreground)" } | 
+            fzf --reverse --height 45% `
+                --header "📺 SELECT TERMINAL SCHEME (Enter to Apply)" `
+                --border --prompt="🎨 Scheme > " | 
+            ForEach-Object { $_.Split('│')[0].Trim() }
         
         if (-not $selectedName) { return }
 
@@ -732,27 +1135,30 @@ function Set-TerminalScheme {
         Write-Host -NoNewline "${osc}10;$($s.foreground)${bel}"
         Write-Host -NoNewline "${osc}11;$($s.background)${bel}"
         Write-Host -NoNewline "${osc}12;$($s.cursorColor)${bel}"
-        
+
         $ansiColors = @($s.black, $s.red, $s.green, $s.yellow, $s.blue, $s.purple, $s.cyan, $s.white)
         for ($i = 0; $i -lt $ansiColors.Count; $i++) {
-            Write-Host -NoNewline "${osc}4;$i;$($ansiColors[$i])${bel}"
+            if ($ansiColors[$i]) { Write-Host -NoNewline "${osc}4;$i;$($ansiColors[$i])${bel}" }
         }
 
         $settings.profiles.defaults.colorScheme = $selectedName
 
-        $psProfile = $settings.profiles.list | Where-Object { $_.name -eq "PowerShell" }
+        $psProfile = $settings.profiles.list | Where-Object { $_.name -match "PowerShell" }
         if ($psProfile) {
-            $psProfile.colorScheme = $selectedName
+            foreach ($p in $psProfile) { $p.colorScheme = $selectedName }
         }
 
-        $settings | ConvertTo-Json -Depth 100 | Set-Content $settingsPath
+        $settings | ConvertTo-Json -Depth 100 | Set-Content $wtPath
 
         [Environment]::SetEnvironmentVariable("TERM_SCHEME_NAME", $selectedName, "User")
         
-        Write-Host "🎨 Scheme '$selectedName' applied and saved permanently!" -ForegroundColor Cyan
+        Write-Host "`n  🎨 Scheme '$selectedName' applied!" -ForegroundColor Cyan
+        Write-Host "  󰄬  Current session updated via OSC sequences." -ForegroundColor DarkGray
+        Write-Host "  󰄬  Settings.json updated for future sessions." -ForegroundColor DarkGray
 
     } catch {
-        Write-Host "❌ Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  ❌ Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "  Tip: Check if your settings.json has trailing commas or syntax errors." -ForegroundColor DarkYellow
     }
 }
 
@@ -781,8 +1187,8 @@ function Invoke-Zap {
     )
 
     process {
-        if (!(Test-Path $Target)) {
-            Write-Host " ❌ Error: Target '$Target' not found." -ForegroundColor Red
+        if (-not (Test-Path $Target)) {
+            Write-Host "  ❌ Target '$Target' not found." -ForegroundColor Red
             return
         }
 
@@ -790,35 +1196,38 @@ function Invoke-Zap {
         $isDir = Test-Path $fullPath -PathType Container
         $type = if ($isDir) { "DIRECTORY" } else { "FILE" }
 
-        Write-Host "`n ⚠️  DANGER: You are about to permanently delete ${type}: " -NoNewline -ForegroundColor Yellow
-        Write-Host $fullPath -ForegroundColor White
-        $confirm = Read-Host "    Are you sure? (y/N)"
-        if ($confirm -ne "y") { Write-Host "  Aborted." -ForegroundColor Gray; return }
+        Write-Host "`n  ⚠️  DANGER: PERMANENT OBLITERATION" -ForegroundColor Black -BackgroundColor Yellow
+        Write-Host "  Type: " -NoNewline -ForegroundColor Gray
+        Write-Host $type -NoNewline -ForegroundColor White
+        Write-Host " | Path: " -NoNewline -ForegroundColor Gray
+        Write-Host $fullPath -ForegroundColor Cyan
+        
+        $confirm = Read-Host "     Type 'y' to vaporize this item"
+        if ($confirm -ne "y") { Write-Host "  󰜺  Zap aborted." -ForegroundColor Gray; return }
 
-        Write-Host "`n 󰆴 Starting Atomic Delete..." -ForegroundColor Cyan
+        Write-Host "`n  󰆴  Initiating Atomic Delete..." -ForegroundColor Magenta
+        Write-Host "  " + ("─" * 45) -ForegroundColor DarkGray
 
         try {
             if ($isDir) {
-                Get-ChildItem -Path $fullPath -Recurse -Force | ForEach-Object {
-                    Write-Host "    󰆴 Deleting: $($_.FullName)" -ForegroundColor DarkGray
-                    Remove-Item -Path $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
-                }
-
-                Write-Host "    󱆳 Finalizing directory removal..." -ForegroundColor Blue
+                Write-Host "  󰛓  Stripping attributes..." -ForegroundColor DarkGray
+                cmd /c "attrib -r -s -h `"$fullPath`" /s /d" 2>$null
+                Write-Host "  󰆴  Executing RD /S /Q..." -ForegroundColor Cyan
                 cmd /c "rd /s /q `"$fullPath`"" 2>$null
             } else {
-                Write-Host "    󰆴 Deleting: $fullPath" -ForegroundColor DarkGray
+                Write-Host "  󰆴  Deleting file..." -ForegroundColor DarkGray
                 Set-ItemProperty -Path $fullPath -Name IsReadOnly -Value $false -ErrorAction SilentlyContinue
-                Remove-Item -Path $fullPath -Force
+                Remove-Item -Path $fullPath -Force -ErrorAction Stop
             }
 
-            if (!(Test-Path $fullPath)) {
-                Write-Host "`n ✅ ZAP! Successfully obliterated." -ForegroundColor Green
+            if (-not (Test-Path $fullPath)) {
+                Write-Host "  ✅ ZAP! Successfully obliterated.`n" -ForegroundColor Green
             } else {
-                Write-Host "`n ❌ Error: The system is still locking some items." -ForegroundColor Red
+                Write-Host "  ❌ Error: Access Denied or File Locked by another process.`n" -ForegroundColor Red
             }
+
         } catch {
-            Write-Host "`n ❌ Critical Error: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "  ❌ Critical Failure: $($_.Exception.Message)" -ForegroundColor Red
         }
     }
 }
@@ -826,37 +1235,52 @@ function Invoke-Zap {
 function Invoke-QuickSearch {
     param([string]$query = "")
     
-    Write-Host " 🔍 Searching accurately... (Ctrl+C to abort)" -ForegroundColor DarkGray
+    Write-Host "`n  🔍  FAST FINDER" -ForegroundColor Magenta
+    Write-Host "  " + ("─" * 45) -ForegroundColor DarkGray
+    Write-Host "  (Enter: Open Code | Ctrl+C: Copy Path | Ctrl+G: Go to folder)`n" -ForegroundColor Gray
 
-    $files = Get-ChildItem -Recurse -File -ErrorAction SilentlyContinue | 
-        Where-Object { 
-            $_.FullName -notmatch '\\\.git|\\\.venv|\\node_modules' -and
-            ($query -eq "" -or $_.Name -match $query -or $_.Extension -match $query)
-        } | ForEach-Object { $_.FullName }
+    if (Get-Command fd -ErrorAction SilentlyContinue) {
+        $files = fd --type f --exclude .git --exclude node_modules --exclude .venv $query
+    } else {
+        $files = where.exe /r . * | Where-Object { $_ -notmatch '\\\.git|\\\.venv|\\node_modules' }
+    }
 
     if (-not $files) {
-        Write-Host " ❌ No files matching '$query' found." -ForegroundColor Red
+        Write-Host "  ❌ No files matching '$query' found." -ForegroundColor Red
         return
     }
 
-    $selection = $files | fzf --query "$query" `
+    $result = $files | fzf --query "$query" `
         --reverse `
-        --header "󰩉 EXACT FIND & ACTION" `
-        --tiebreak=end,length `
-        --extended `
-        --preview "bat --color=always --style=numbers {1}"
-    
+        --header="[Enter: VS Code | Ctrl-C: Copy | Ctrl-G: CD | Esc: Exit]" `
+        --preview="bat --color=always --style=numbers --line-range :500 {}" `
+        --expect="ctrl-c,ctrl-g" `
+        --border="rounded" `
+        --info="inline"
+
+    if (-not $result) { return }
+
+    $key = $result[0]
+    $selection = $result[1].Trim()
+
     if ($selection) {
-        $selection = $selection.Trim()
-        Write-Host "`n 📄 Selected: " -NoNewline -ForegroundColor Cyan
-        Write-Host (Split-Path $selection -Leaf) -ForegroundColor White
-        
-        $action = Read-Host "    (o)pen in Code | (c)opy path | (g)o to folder? [o/c/g]"
-        switch ($action) {
-            "o" { code $selection }
-            "c" { $selection | clip; Write-Host "  ✅ Path copied to clipboard!" -ForegroundColor Green }
-            "g" { Set-Location (Split-Path $selection) }
-            default { Write-Host "  󰅚 Operation cancelled." -ForegroundColor Gray }
+        switch ($key) {
+            "ctrl-c" { 
+                $selection | clip
+                Write-Host "  ✅ Path copied: " -NoNewline -ForegroundColor Green
+                Write-Host $selection -ForegroundColor White
+            }
+            "ctrl-g" { 
+                $dir = Split-Path $selection
+                Set-Location $dir
+                Write-Host "  📂 Navigated to: " -NoNewline -ForegroundColor Cyan
+                Write-Host $dir -ForegroundColor White
+            }
+            default { 
+                code $selection
+                Write-Host "  📄 Opening in VS Code: " -NoNewline -ForegroundColor Blue
+                Write-Host (Split-Path $selection -Leaf) -ForegroundColor White
+            }
         }
     }
 }
@@ -877,21 +1301,50 @@ function Invoke-KillProcess {
 
 function Get-GitStatusSummary {
     Write-Host "`n  󰊢  GIT REPOSITORY SCANNER" -ForegroundColor Cyan
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    
+    Write-Host "  " + ("─" * 60) -ForegroundColor DarkGray
+
+    Write-Host ("  {0,-25} {1,-15} {2,-10}" -f "REPOSITORY", "BRANCH", "STATUS") -ForegroundColor Gray
+    Write-Host "  " + ("-" * 60) -ForegroundColor DarkGray
+
     Get-ChildItem -Directory | ForEach-Object {
-        $dotGit = Join-Path $_.FullName ".git"
+        $repoPath = $_.FullName
+        $dotGit = Join-Path $repoPath ".git"
+        
         if (Test-Path $dotGit) {
-            Push-Location $_.FullName
-            $status = git status --porcelain
-            $branch = git rev-parse --abbrev-ref HEAD
-            $color = if ($status) { "Yellow" } else { "Green" }
-            $icon = if ($status) { "󱓻" } else { "󰄬" }
+            $branch = git -C $repoPath rev-parse --abbrev-ref HEAD 2>$null
+            if (-not $branch) { $branch = "DETACHED" }
+            $statusRaw = git -C $repoPath status --porcelain 2>$null
+            $counts = git -C $repoPath rev-list --left-right --count HEAD...@{u} 2>$null
+            $ahead = 0; $behind = 0
+            if ($counts -match "(\d+)\s+(\d+)") {
+                $ahead = $Matches[1]
+                $behind = $Matches[2]
+            }
+
+            $color = "Green"
+            $icon = "󰄬"
+            $msg = "Clean"
+
+            if ($statusRaw) {
+                $color = "Yellow"
+                $icon = "󱓻"
+                $msg = "Modified"
+            }
+
+            if ($ahead -gt 0) { 
+                $msg += " (↑$ahead)"
+                $color = "Cyan"
+            }
+            if ($behind -gt 0) { 
+                $msg += " (↓$behind)"
+                $color = "Red"
+                $icon = "󰚰"
+            }
 
             Write-Host "  $icon  " -NoNewline -ForegroundColor $color
-            Write-Host "$($_.Name.PadRight(20))" -NoNewline -ForegroundColor White
-            Write-Host " [$branch]" -ForegroundColor Gray
-            Pop-Location
+            Write-Host "{0,-22}" -f $_.Name -NoNewline -ForegroundColor White
+            Write-Host " {0,-15}" -f "[$branch]" -NoNewline -ForegroundColor Gray
+            Write-Host " $msg" -ForegroundColor $color
         }
     }
     Write-Host ""
@@ -1001,109 +1454,214 @@ target_include_directories(\${PROJECT_NAME} PUBLIC include)
     if ($open -eq "y") { code . }
 }
 
-function help-system {
+function Get-InstallHistory {
     Clear-Host
-    Write-Host "`n  󰞷  TERMINAL COMMAND CENTER - USER GUIDE" -ForegroundColor Magenta
-    Write-Host "  ================================================================" -ForegroundColor DarkGray
+    Write-Host "`n    EXTENDED INSTALLATION HISTORY (Last 7 Days)" -ForegroundColor Magenta
+    Write-Host ("  " + ("─" * 145)) -ForegroundColor DarkGray
+    
+    $limitDate = (Get-Date).AddDays(-7)
+    $foundAny  = $false
 
-    function Out-Cmd ($List) {
-        foreach ($c in $List) {
-            Write-Host "    $($c.Cmd.PadRight(16))" -ForegroundColor Green -NoNewline
-            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
-            Write-Host $c.Desc -ForegroundColor White
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    $regApps = Get-ItemProperty $regPaths -ErrorAction SilentlyContinue | 
+        Where-Object { $_.InstallDate -ne $null -and $_.DisplayName -ne $null } | 
+        ForEach-Object {
+            try {
+                $name = $_.DisplayName
+                if ($name -match "\{\{.+?\}\}") { $name = "NVIDIA Component (Internal Name)" }
+                
+                $cleanDate = [DateTime]::ParseExact($_.InstallDate, "yyyyMMdd", $null)
+                if ($cleanDate -ge $limitDate) {
+                    [PSCustomObject]@{
+                        DisplayName = $name
+                        Version     = $_.DisplayVersion
+                        Publisher   = $_.Publisher
+                        Date        = $cleanDate
+                        Source      = 'Registry'
+                        Details     = "Standard Setup"
+                    }
+                }
+            } catch { $null }
+        }
+
+    $msiEvents = Get-WinEvent -FilterHashtable @{
+        LogName   = 'System'
+        ID        = 19, 4371 
+        StartTime = $limitDate
+    } -ErrorAction SilentlyContinue | ForEach-Object {
+        $msg = $_.Message
+        $name = if ($msg -match "'(.+?)'") { $Matches[1] } else { "System Component" }
+        
+        $shortDetail = "Event ID: $($_.Id)"
+        if ($msg -match "HRESULT:\s*(0x[0-9A-Fa-f]+|.+?)\.") { $shortDetail = "Res: $($Matches[1])" }
+        elseif ($msg -match "Estado:\s*(.+?)\.") { $shortDetail = "$($Matches[1])" }
+        elseif ($msg -match "temporizador:\s*(.+?)\.") { $shortDetail = "Timer Change" }
+
+        [PSCustomObject]@{
+            DisplayName = $name
+            Version     = "N/A"
+            Publisher   = "Microsoft/Kernel"
+            Date        = $_.TimeCreated
+            Source      = 'EventLog'
+            Details     = $shortDetail
         }
     }
 
-    # 1. NAVIGATION & SEARCH
+    $allHistory = ($regApps + $msiEvents) | 
+        Sort-Object Date -Descending | 
+        Group-Object DisplayName | 
+        ForEach-Object { $_.Group[0] }
+
+    if ($allHistory) {
+        Write-Host ("    {0,-40} │ {1,-12} │ {2,-18} │ {3,-15} │ {4}" -f "APPLICATION", "VERSION", "PUBLISHER", "DATE / TIME", "DETAILS") -ForegroundColor DarkCyan
+        Write-Host ("    " + ("─" * 140)) -ForegroundColor DarkGray
+
+        foreach ($app in $allHistory) {
+            $foundAny = $true
+            $dateStr = if ($app.Source -eq 'EventLog') { $app.Date.ToString("dd/MM HH:mm") } else { $app.Date.ToString("dd/MM/yyyy") }
+
+            $displayNm = if ($app.DisplayName.Length -gt 38) { $app.DisplayName.Substring(0, 35) + "..." } else { $app.DisplayName }
+            $version   = if ($app.Version -and $app.Version.Length -gt 10) { $app.Version.Substring(0, 9) + ".." } else { $app.Version }
+            $publisher = if ($app.Publisher -and $app.Publisher.Length -gt 16) { $app.Publisher.Substring(0, 14) + ".." } else { $app.Publisher }
+            $details   = if ($app.Details.Length -gt 40) { $app.Details.Substring(0, 37) + "..." } else { $app.Details }
+
+            Write-Host "    " -NoNewline
+            Write-Host ("{0,-38} " -f $displayNm) -ForegroundColor White -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            Write-Host ("{0,-10} " -f ($version ?? "---")) -ForegroundColor Gray -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            Write-Host ("{0,-16} " -f ($publisher ?? "Unknown")) -ForegroundColor Blue -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            Write-Host ("{0,-13} " -f $dateStr) -ForegroundColor Yellow -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            
+            if ($app.Source -eq 'Registry') {
+                Write-Host ("{0,-38} " -f $details) -ForegroundColor DarkGreen -NoNewline
+                Write-Host "󰘙" -ForegroundColor Green
+            } else {
+                Write-Host ("{0,-38} " -f $details) -ForegroundColor Cyan -NoNewline
+                Write-Host "󱑤" -ForegroundColor Cyan
+            }
+            Write-Host "" # Salto de línea limpio
+        }
+    }
+
+    if (-not $foundAny) {
+        Write-Host "    No installation activity detected in the last 7 days." -ForegroundColor Gray
+    }
+
+    Write-Host ("  " + ("─" * 145)) -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+function help-system {
+    Clear-Host
+    Write-Host "`n  󰞷  TERMINAL COMMAND CENTER - USER GUIDE" -ForegroundColor Magenta
+    Write-Host "  " + ("=" * 85) -ForegroundColor DarkGray
+
+    function Out-Cmd ($List) {
+        Write-Host ("    {0,-8} │ {1,-18} │ {2}" -f "ALIAS", "FUNCTION", "DESCRIPTION") -ForegroundColor DarkCyan
+        Write-Host ("    " + ("─" * 81)) -ForegroundColor DarkGray
+
+        foreach ($c in $List) {
+            Write-Host "    $($c.A.PadRight(8))" -ForegroundColor Yellow -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            Write-Host "$($c.C.PadRight(18))" -ForegroundColor Green -NoNewline
+            Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+            Write-Host $c.D -ForegroundColor White
+        }
+    }
+
     Write-Host "`n  󰙅  NAVIGATION & SEARCH" -ForegroundColor Cyan
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host ""
     Out-Cmd @(
-        @{ Cmd = "l / ll / la"; Desc = "List files (eza) with icons/details" },
-        @{ Cmd = ".. [n] / p";  Desc = "Go up 'n' levels / Project Navigator" },
-        @{ Cmd = "ff / find";   Desc = "Fuzzy find to Open (Code) or Action (o/c/g)" },
-        @{ Cmd = "fp <text>";   Desc = "Find Text: Search inside files (ripgrep)" },
-        @{ Cmd = "mcd / zap";   Desc = "Smart Create Dir / Atomic Force-Delete" }
+        @{ A="..";    C="up";              D="Go up 'n' levels (smart root detection)" },
+        @{ A="find";  C="Invoke-QuickSearch";D="Instant find & Action (Code/CD/Clip)" },
+        @{ A="ff";    C="Invoke-FuzzyOpen"; D="Fuzzy find and open file in VS Code" },
+        @{ A="fp";    C="find-text";       D="Search text inside files (Ripgrep)" },
+        @{ A="zap";   C="Invoke-Zap";      D="Atomic Delete: Nuclear wipe of targets" },
+        @{ A="mcd";   C="mcd";             D="Create and enter directory (recursive)" }
     )
 
-    # 2. DEVELOPMENT & GITHUB
     Write-Host "`n  󰊢  DEVELOPMENT ARCHITECT" -ForegroundColor Blue
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host ""
     Out-Cmd @(
-        @{ Cmd = "newp";         Desc = "Architect: Scaffolding (Flutter, Rust, Vite...)" },
-        @{ Cmd = "rs [-View]";   Desc = "GitHub: Repo stats or interactive Issues/PRs" },
-        @{ Cmd = "gs / va";      Desc = "Git Status Summary / Activate Python venv" },
-        @{ Cmd = "t [task]";     Desc = "Task Manager: Add or manage your To-Do list" },
-        @{ Cmd = "keys";         Desc = "WezTerm Guide: Show terminal shortcuts" }
+        @{ A="gs";    C="Get-GitStatusSum"; D="Git Dashboard: Status, Branch & Sync" },
+        @{ A="va";    C="activate";        D="Python: Auto-activate venv (Scripts/bin)" },
+        @{ A="extr";  C="Set-ExtractFile";  D="Smart Extract: Unpack to auto-folder" },
+        @{ A="newp";  C="New-Project";     D="Scaffolding: Generate project structures" },
+        @{ A="rs";    C="Get-RepoStats";    D="GitHub: Repository issues and PR stats" }
     )
 
-    # 3. VISUALIZERS & MONITORING
-    Write-Host "`n  󰘚  VISUALIZERS & MONITORING" -ForegroundColor Yellow
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host "`n  󰘚  SYSTEM & MONITORING" -ForegroundColor Yellow
+    Write-Host ""
     Out-Cmd @(
-        @{ Cmd = "jv / cv / lv"; Desc = "Visualizers: JSON tree / CSV table / Log colors" },
-        @{ Cmd = "pv / ps";      Desc = "Monitor: Top 20 Process / Service monitor" },
-        @{ Cmd = "wup";          Desc = "Winget: Visual scanner for pending updates" },
-        @{ Cmd = "myip / ports"; Desc = "Network: IP info / Listening TCP ports" },
-        @{ Cmd = "st / w";       Desc = "Visual: Set Terminal Scheme / Weather" }
+        @{ A="di";    C="diskinfo";        D="Storage: Visual health bar and usage %" },
+        @{ A="pv";    C="Show-ProcessVis";  D="Monitor: Interactive top process viewer" },
+        @{ A="ports"; C="Get-NetworkPorts"; D="Network: Show all listening TCP ports" },
+        @{ A="st";    C="Set-TerminalSch";  D="Theme: Live preview and set scheme" },
+        @{ A="wup";   C="Check-WingetVis";  D="Updates: Visual scanner for pending apps" },
+        @{ A="uptime";C="uptime";           D="System: Boot time and active duration" }
     )
 
-    # 4. MAINTENANCE & SHORTCUTS
     Write-Host "`n  󰠵  MAINTENANCE & TOOLS" -ForegroundColor Green
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Write-Host ""
     Out-Cmd @(
-        @{ Cmd = "us / uw / uc"; Desc = "Update: Scoop / Winget / Choco (Silent)" },
-        @{ Cmd = "reload / ep";  Desc = "Reload Shell / Edit Profile in Code" },
-        @{ Cmd = "hix / ed";     Desc = "History Exec / Edit file fast via FZF" },
-        @{ Cmd = "kill";         Desc = "Sniper Mode: Select and kill process via FZF" },
-        @{ Cmd = "whereis";      Desc = "Search installation source of any app" }
+        @{ A="us/uw";   C="Update-Scoop/W";    D="Silent update for Scoop and WinGet" },
+        @{ A="hi";      C="Get-InstallHist";   D="Timeline: Software installed in last 7 days" },
+        @{ A="psv";     C="Show-ProcessVisual"; D="Real-time CPU/RAM monitor (Live)" },
+        @{ A="cv";      C="Show-CsvVisual";    D="CSV: Auto-delim. [ > 50 rows -> GridView ]" },
+        @{ A="lv";      C="Show-LogVisual";    D="Log: [-Lines n] [-Wait] for Live Tail" },
+        @{ A="jv";      C="Show-JsonVisual";   D="JSON: [-MaxDepth n] Tree structure viewer" },
+        @{ A="kill";    C="Invoke-KillProc";   D="Sniper: Select and kill process via FZF" },
+        @{ A="rmmodf";  C="Remove-ModuleFzf";  D="FZF Uninstaller: Select & Remove Modules" },
+        @{ A="ed";      C="edit-fast";         D="FZF Editor: Quick open files in Code" },
+        @{ A="whereis"; C="Get-InstallMeth";   D="Source: Find app installation path" }
     )
 
-    # 5. HOTKEYS
-    Write-Host "`n  󰌌  KEYBOARD SHORTCUTS" -ForegroundColor Magenta
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "    [Ctrl + T]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Fuzzy file search & Copy Path"
-    Write-Host "    [Ctrl + G]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Interactive Folder History (Zoxide)"
-    Write-Host "    [Ctrl + U]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Extract URLs from history & Copy"
-    Write-Host "    [Ctrl + R]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Smart History search"
+    Write-Host "`n  󰌌  GLOBAL HOTKEYS (FZF)" -ForegroundColor Magenta
+    Write-Host ""
+    Write-Host ("    " + ("─" * 81)) -ForegroundColor DarkGray
+    Write-Host "    Ctrl + T │ Quick file search   │ Ctrl + G │ Folder History (Zoxide)" -ForegroundColor White
+    Write-Host "    Ctrl + R │ Smart History       │ Ctrl + L │ Clear & Refresh UI" -ForegroundColor White
 
-    Write-Host "`n  Type 'help' or 'h' anytime to see this guide.`n" -ForegroundColor DarkGray
+    Write-Host "`n  Type 'h' or 'help' to show this guide again.`n" -ForegroundColor DarkGray
 }
 
 function welcome {
     Clear-Host
-    $config = Get-ProfileConfig
-    $user = $env:USERNAME
-    $computer = $env:COMPUTERNAME
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+    $osInfo = Get-CimInstance Win32_OperatingSystem
+    $cpuInfo = Get-CimInstance Win32_Processor
+    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+    $gpuList = (Get-CimInstance Win32_VideoController).Name | Where-Object { $_ -notmatch "Virtual|Meta" }
+
+    $totalRam = [Math]::Round($osInfo.TotalVisibleMemorySize / 1MB, 0)
+    $freeRam = [Math]::Round($osInfo.FreePhysicalMemory / 1MB, 1)
+    $usedRam = $totalRam - $freeRam
+    $percentRam = [Math]::Round(($usedRam / $totalRam) * 100, 0)
+
+    $diskFree = [Math]::Round($disk.FreeSpace / 1GB, 1)
+    $diskTotal = [Math]::Round($disk.Size / 1GB, 0)
 
     $settingsPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
     $totalThemes = 0
     if (Test-Path $settingsPath) {
-        $st = Get-Content $settingsPath -Raw | ConvertFrom-Json
-        $totalThemes = ($st.schemes | Measure-Object).Count
+        $raw = Get-Content $settingsPath -Raw
+        $clean = $raw -replace '(?m)^\s*//.*|(?m)\s//.*', '' # Limpieza de comentarios
+        $totalThemes = ($clean | ConvertFrom-Json).schemes.Count
     }
 
-    $osInfo = Get-CimInstance Win32_OperatingSystem
-    $os = $osInfo.Caption.Replace("Microsoft ", "")
-    $cpu = (Get-CimInstance Win32_Processor).Name.Replace("(TM)", "").Replace("(R)", "").Trim()
-    $gpuList = (Get-CimInstance Win32_VideoController).Name | Where-Object { $_ -notmatch "Virtual|Meta" }
-    $gpu = $gpuList -join ", "
-    
-    $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
-    $diskFree = [Math]::Round($disk.FreeSpace / 1GB, 1)
-    $diskTotal = [Math]::Round($disk.Size / 1GB, 0)
-
-    $totalRam = [Math]::Round($osInfo.TotalVisibleMemorySize / 1MB, 0)
-    $usedRam = [Math]::Round(($osInfo.TotalVisibleMemorySize - $osInfo.FreePhysicalMemory) / 1MB, 1)
-    $percentRam = [Math]::Round(($usedRam / $totalRam) * 100, 0)
-    $barLength = 10
-    $filledLength = [Math]::Round(($percentRam / 100) * $barLength)
-    $bar = ("█" * $filledLength) + ("░" * ($barLength - $filledLength))
-    
     $ip = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias "Wi-Fi", "Ethernet" | Select-Object -First 1).IPAddress
+    $wslStatusRaw = if (Get-Process "wslhost" -ErrorAction SilentlyContinue) { "Running" } else { "Stopped" }
     $uptimeObj = (Get-Date) - $osInfo.LastBootUpTime
     $uptimeStr = "$($uptimeObj.Days)d $($uptimeObj.Hours)h $($uptimeObj.Minutes)m"
-    $wslStatusRaw = if (Get-Process "wslhost" -ErrorAction SilentlyContinue) { "Running" } else { "Stopped" }
-    $wslStatus = "󰟈 $wslStatusRaw"
 
     Add-Type -AssemblyName System.Windows.Forms
     $screens = [System.Windows.Forms.Screen]::AllScreens
@@ -1111,43 +1669,42 @@ function welcome {
     $displayInfo = @()
     for ($i = 0; $i -lt $screens.Count; $i++) {
         $res = "$($screens[$i].Bounds.Width)x$($screens[$i].Bounds.Height)"
-        if ($wmiMonitors[$i].InstanceName -match 'DISPLAY\\(?<model>[^\\]+)\\') { $model = $Matches['model'] } else { $model = "Display" }
+        if ($wmiMonitors[$i].InstanceName -match 'DISPLAY\\(?<model>[^\\]+)\\') { 
+            $model = $Matches['model'] 
+        } else { 
+            $model = "Display" 
+        }
         $displayInfo += "$model ($res)"
     }
-    $displayStr = $displayInfo -join ", "
+    $displayStr = $displayInfo -join " | "
 
-    $weatherCity = $config.weatherCity 
-    $weatherClean = "Unknown" 
+    $weatherClean = "N/A"
     if ($global:canConnectToGithub) {
         try {
-            $weatherRaw = curl.exe -s "wttr.in/$($weatherCity)?format=%t" --connect-timeout 2
-            if ($weatherRaw -and $weatherRaw -notmatch "HTML") {
-                $weatherClean = $weatherRaw.Replace("┬░", "°").Replace("Â", "").Trim()
-            }
-        } catch { $weatherClean = "N/A" }
+            $weatherRaw = curl.exe -s "wttr.in?format=%t" --connect-timeout 1
+            if ($weatherRaw -and $weatherRaw -notmatch "HTML") { $weatherClean = $weatherRaw.Trim() }
+        } catch {}
     }
 
     $currentScheme = [Environment]::GetEnvironmentVariable("TERM_SCHEME_NAME", "User") ?? "Default"
-
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
+    
     $bannerStyles = @(
         @'
-    .---.  .---. .-.     .---.  .---. .-.  .-. .---. 
+    .---.  .---. .-.      .---.  .---. .-.  .-. .---. 
     | |  \ | |-  | |__   | |    | | | | |/\| | | |-  
     `---'  `---' `----'  `---'  `---' `__n__n' `---' 
     >> SYSTEM_ACCESS_GRANTED_
 '@,
         @'
-     ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ ▄▄▄     ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ 
-    █       █       █       █       █       █       █       █
-    █▄▄▄▄▄▄▄█    ▄▄▄█    ▄▄▄█       █   ▄   █   ▄   █    ▄▄▄█
-    █       █   █▄▄▄█   █▄▄▄█      ▄█  █ █  █  █ █  █   █▄▄▄ 
-    █▄▄▄▄▄▄▄█    ▄▄▄█    ▄▄▄█     █▄█  █▄█  █  █▄█  █    ▄▄▄█
-    █       █   █▄▄▄█   █▄▄▄█       █       █       █   █▄▄▄ 
-    █▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█
+      ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ ▄▄▄     ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ ▄▄▄▄▄▄▄ 
+     █       █       █       █       █       █       █       █
+     █▄▄▄▄▄▄▄█    ▄▄▄█    ▄▄▄█       █   ▄   █   ▄   █    ▄▄▄█
+     █       █   █▄▄▄█   █▄▄▄█      ▄█  █ █  █  █ █  █   █▄▄▄ 
+     █▄▄▄▄▄▄▄█    ▄▄▄█    ▄▄▄█     █▄█  █▄█  █  █▄█  █    ▄▄▄█
+     █       █   █▄▄▄█   █▄▄▄█       █       █       █   █▄▄▄ 
+     █▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█▄▄▄▄▄▄▄█
 '@,
-       @'
+        @'
     [#] --------------------------------------------- [#]
     [#]  USER : $USER //  HOST : $HOST  //  LVL: 01  [#]
     [#]  IPV4 : $IP   //  WSL  : $WSL   //  NET: ON  [#]
@@ -1164,17 +1721,17 @@ function welcome {
     /==========\----------------------------------/==========\
      |  UP-TIME : $UPTIME                        |
      |  STATUS  : ONLINE                          |
-     |  KERNEL  : $SHELL                        |
+     |  KERNEL  : $SHELL                          |
     \==========/----------------------------------\==========/
 '@
     )
 
     $replacements = @{
-        '$USER'   = $user.ToUpper().PadRight(8).Substring(0,8)
-        '$HOST'   = $computer.ToUpper().PadRight(7).Substring(0,7)
+        '$USER'   = $env:USERNAME.ToUpper().PadRight(8).Substring(0,8)
+        '$HOST'   = $env:COMPUTERNAME.ToUpper().PadRight(7).Substring(0,7)
         '$IP'     = $ip.PadRight(13).Substring(0,13)
         '$WSL'    = $wslStatusRaw.ToUpper().PadRight(5).Substring(0,5)
-        '$UPTIME' = $uptimeStr.PadRight(25)
+        '$UPTIME' = $uptimeStr.PadRight(20)
         '$SHELL'  = "pwsh $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)".PadRight(25)
     }
 
@@ -1189,21 +1746,24 @@ function welcome {
         Write-Host "    $newLine" -ForegroundColor $bannerColor
     }
 
-    Write-Host "`n    $user@$computer" -ForegroundColor Cyan
-    Write-Host "    ---------------------------------------" -ForegroundColor DarkGray
+    Write-Host "`n    $($env:USERNAME)@$($env:COMPUTERNAME)" -ForegroundColor Cyan
+    Write-Host "    " + ("─" * 45) -ForegroundColor DarkGray
+
+    $barFill = [Math]::Max(0, [Math]::Min(10, [int]($percentRam / 10)))
+    $bar = ("█" * $barFill) + ("░" * (10 - $barFill))
 
     $infoLayout = @(
-        @{ Label = "    OS      "; Value = $os; Color = "White" }
-        @{ Label = "    CPU     "; Value = $cpu; Color = "Cyan" }
-        @{ Label = "  󰢮  GPU     "; Value = $gpu; Color = "Green" }
+        @{ Label = "    OS      "; Value = $osInfo.Caption.Replace("Microsoft ", ""); Color = "White" }
+        @{ Label = "    CPU     "; Value = $cpuInfo.Name.Trim(); Color = "Cyan" }
+        @{ Label = "  󰢮  GPU     "; Value = ($gpuList -join ", "); Color = "Green" }
         @{ Label = "  󰍹  Displays"; Value = $displayStr; Color = "Red" }
-        @{ Label = "    RAM      "; Value = "[$bar] $usedRam GB / $totalRam GB ($percentRam%)"; Color = "Yellow" }
+        @{ Label = "    RAM     "; Value = "[$bar] $usedRam GB / $totalRam GB ($percentRam%)"; Color = "Yellow" }
         @{ Label = "  󰋊  Disk (C)"; Value = "$diskFree GB Free / $diskTotal GB Total"; Color = "Cyan" }
-        @{ Label = "  󰩟  Local IP "; Value = $ip; Color = "Green" }
-        @{ Label = "  󱑍  Uptime   "; Value = $uptimeStr; Color = "Magenta" }
-        @{ Label = "    Shell    "; Value = "pwsh $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)"; Color = "Blue" }
-        @{ Label = "    Weather  "; Value = $weatherClean; Color = "White" }
-        @{ Label = "  󰟈 WSL       "; Value = $wslStatus; Color = "Cyan" }
+        @{ Label = "  󰩟  Local IP"; Value = $ip; Color = "Green" }
+        @{ Label = "  󱑍  Uptime  "; Value = $uptimeStr; Color = "Magenta" }
+        @{ Label = "    Shell   "; Value = "pwsh $($PSVersionTable.PSVersion.Major).$($PSVersionTable.PSVersion.Minor)"; Color = "Blue" }
+        @{ Label = "    Weather "; Value = $weatherClean; Color = "White" }
+        @{ Label = "  󰟈 WSL      "; Value = "󰟈 $wslStatusRaw"; Color = "Cyan" }
     )
 
     foreach ($item in $infoLayout) {
@@ -1227,63 +1787,81 @@ function welcome {
     if ($lastSysEvent) {
         Write-Host "    󰒃 System Handshake: $($lastSysEvent.ToString('dd/MM HH:mm'))" -ForegroundColor DarkGray
     }
+
     Write-Host "`n    " -NoNewline
     $colors = @("DarkRed", "DarkGreen", "DarkYellow", "DarkBlue", "DarkMagenta", "DarkCyan", "Gray")
     foreach ($c in $colors) { Write-Host "󰮯 " -ForegroundColor $c -NoNewline }
 
     Write-Host "  󰸌  $currentScheme " -ForegroundColor Magenta -NoNewline
     Write-Host "($totalThemes available)" -ForegroundColor DarkGray
-    Write-Host "`n  Type 'help' or 'h' anytime to see help menu.`n" -ForegroundColor DarkGray
-    Write-Host ""
-
+    Write-Host "`n    Type 'help' or 'h' anytime to see help menu.`n" -ForegroundColor DarkGray
 }
 
 function Get-WezKeybinds {
+    $sep = "  " + ("─" * 68)
+    
     Clear-Host
     Write-Host "`n  󱊖  WEZTERM SHORTCUTS GUIDE" -ForegroundColor Magenta
-    Write-Host "  ================================================================" -ForegroundColor DarkGray
+    Write-Host $sep -ForegroundColor DarkGray
 
     function Out-Key ($K, $M, $D) {
-        $keyText = "    [$M + $K]".PadRight(25)
-        Write-Host $keyText -ForegroundColor Yellow -NoNewline
-        Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+        Write-Host "    " -NoNewline
+        Write-Host "[" -NoNewline -ForegroundColor DarkGray
+        Write-Host $M -NoNewline -ForegroundColor Yellow
+        Write-Host " + " -NoNewline -ForegroundColor DarkGray
+        Write-Host "$K]" -NoNewline -ForegroundColor Cyan
+
+        $currentLength = ($M + $K + 7).Length
+        $pad = " " * ([Math]::Max(1, (28 - $currentLength)))
+        
+        Write-Host $pad -NoNewline
+        Write-Host " │ " -NoNewline -ForegroundColor DarkGray
         Write-Host $D -ForegroundColor White
     }
 
     Write-Host "`n  󰝤  PANELS & SPLITS" -ForegroundColor Cyan
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Out-Key "D"         "ALT+SHIFT"  "Split Horizontal"
-    Out-Key "S"         "ALT+SHIFT"  "Split Vertical"
-    Out-Key "Z"         "CTRL+SHIFT" "Toggle Zoom (Maximize Pane)"
-    Out-Key "Q"         "CTRL+SHIFT" "Close Current Pane"
-    Out-Key "B"         "CTRL"       "Rotate Panes (Counter-Clockwise)"
+    Write-Host $sep -ForegroundColor DarkGray
+    Out-Key "D"          "ALT+SHIFT"  "Split Horizontal"
+    Out-Key "S"          "ALT+SHIFT"  "Split Vertical"
+    Out-Key "Z"          "CTRL+SHIFT" "Toggle Zoom (Maximize Pane)"
+    Out-Key "Q"          "CTRL+SHIFT" "Close Current Pane"
+    Out-Key "B"          "CTRL"       "Rotate Panes (CCW)"
 
     Write-Host "`n  󰜂  NAVIGATION" -ForegroundColor Green
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Out-Key "Arrows"    "ALT"        "Activate Pane (Left/Right/Up/Down)"
-    Out-Key "L/R Arrow" "ALT+SHIFT"  "Switch Tab (Previous/Next)"
-    Out-Key "N"         "ALT"        "Show Tab Navigator"
-    Out-Key "L"         "ALT"        "Show Launcher (Tabs/Workspaces)"
+    Write-Host $sep -ForegroundColor DarkGray
+    Out-Key "Arrows"     "ALT"        "Activate Pane (Direction)"
+    Out-Key "L/R Arrow"  "ALT+SHIFT"  "Switch Tab (Prev/Next)"
+    Out-Key "N"          "ALT"        "Show Tab Navigator"
+    Out-Key "L"          "ALT"        "Show Launcher (Workspaces)"
 
     Write-Host "`n  󰩨  PANE RESIZING" -ForegroundColor Blue
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Out-Key "Arrows"    "CTRL+ALT"   "Adjust Pane Size (5 units)"
+    Write-Host $sep -ForegroundColor DarkGray
+    Out-Key "Arrows"     "CTRL+ALT"   "Adjust Pane Size (5 units)"
 
     Write-Host "`n  󰓩  SYSTEM & TABS" -ForegroundColor Yellow
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Out-Key "T"         "ALT+SHIFT"  "New Tab (Current Domain)"
-    Out-Key "F"         "CTRL+SHIFT" "Toggle FullScreen"
+    Write-Host $sep -ForegroundColor DarkGray
+    Out-Key "T"          "ALT+SHIFT"  "New Tab (Current Domain)"
+    Out-Key "F"          "CTRL+SHIFT" "Toggle FullScreen"
 
-    Write-Host "`n  Tip: Use 'ALT+N' for a visual tab overview.`n" -ForegroundColor DarkGray
+    Write-Host "`n  󰋚  Tip: Use 'ALT+N' for a visual tab overview." -ForegroundColor DarkGray
+    Write-Host $sep -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 function Check-WingetVisual {
     Write-Host "`n 󰚰  Scanning for Winget updates..." -ForegroundColor Magenta
 
-    $raw = winget upgrade | Where-Object { $_ -match '\S' }
+    $raw = winget upgrade | Where-Object { $_ -match '\S' -and $_ -notmatch 'Loading|Cargando|\[.*\]' }
+
+    if (-not $raw) {
+        Write-Host " ✅ All systems operational. No updates found." -ForegroundColor Green
+        return
+    }
 
     $headerLine = ""
     $dividerLine = ""
+    $dataStart = 0
+
     for ($i = 0; $i -lt $raw.Count; $i++) {
         if ($raw[$i] -match '^-+$') { 
             $headerLine = $raw[$i-1]
@@ -1307,39 +1885,52 @@ function Check-WingetVisual {
     $posAvailable = $headerLine.IndexOf("Dispon")
     if ($posAvailable -lt 0) { $posAvailable = $headerLine.IndexOf("Available") }
 
-    Write-Host "   UPDATES AVAILABLE:" -ForegroundColor Cyan
-    $separator = "─" * 165
+    $posSource    = $headerLine.IndexOf("Origen")
+    if ($posSource -lt 0) { $posSource = $headerLine.IndexOf("Source") }
+
+    Write-Host "`n   UPDATES AVAILABLE:" -ForegroundColor Cyan
+    $separator = "─" * 125 # Ajustado a un ancho de consola estándar
     Write-Host " $separator" -ForegroundColor DarkGray
-    Write-Host "  $( "APPLICATION".PadRight(35) ) $( "CURRENT".PadRight(25) ) $( "LATEST".PadRight(25) ) $( "QUICK UPDATE COMMAND" )" -ForegroundColor White
+    Write-Host ("   {0,-30} │ {1,-15} │ {2,-15} │ {3}" -f "APPLICATION", "CURRENT", "LATEST", "UPDATE COMMAND") -ForegroundColor White
     Write-Host " $separator" -ForegroundColor DarkGray
 
+    $count = 0
     $raw | Select-Object -Skip $dataStart | ForEach-Object {
         $line = $_
         if ($line -match "actualizaciones disponibles" -or $line -match "updates available") { return }
+        if ($line.Trim().Length -lt 10) { return }
 
         try {
             $name    = $line.Substring(0, $posId).Trim()
             $id      = $line.Substring($posId, ($posVersion - $posId)).Trim()
             $current = $line.Substring($posVersion, ($posAvailable - $posVersion)).Trim()
-            $latest  = $line.Substring($posAvailable).Trim().Split(' ')[0]
 
-            $dispName = if ($name.Length -gt 33) { $name.Substring(0, 30) + "..." } else { $name }
-            $commandId = if ($id -match '…') { $id -replace '…', '*' } else { $id }
+            $endOfAvailable = if ($posSource -gt $posAvailable) { ($posSource - $posAvailable) } else { -1 }
+            if ($endOfAvailable -gt 0) {
+                $latest = $line.Substring($posAvailable, $endOfAvailable).Trim().Split(' ')[0]
+            } else {
+                $latest = $line.Substring($posAvailable).Trim().Split(' ')[0]
+            }
 
-            Write-Host "  󰏗  " -NoNewline -ForegroundColor Yellow
-            Write-Host "$( $dispName.PadRight(31) )" -NoNewline -ForegroundColor White
-            Write-Host "$( $current.PadRight(25) )" -NoNewline -ForegroundColor Gray
-            Write-Host " ➜  " -NoNewline -ForegroundColor Magenta
-            Write-Host "$( $latest.PadRight(24) )" -NoNewline -ForegroundColor Green
-            
-            Write-Host "   " -NoNewline -ForegroundColor DarkGray
-            Write-Host "winget update --id " -NoNewline -ForegroundColor DarkCyan
+            $commandId = $id -replace '…', '*' -replace '\.\.\.', '*'
+            $dispName = if ($name.Length -gt 28) { $name.Substring(0, 27) + "…" } else { $name }
+
+            Write-Host " 󰏗 " -NoNewline -ForegroundColor Yellow
+            Write-Host (" {0,-28} " -f $dispName) -NoNewline -ForegroundColor White
+            Write-Host "│ " -NoNewline -ForegroundColor DarkGray
+            Write-Host (" {0,-14} " -f $current) -NoNewline -ForegroundColor Gray
+            Write-Host "➜ " -NoNewline -ForegroundColor Magenta
+            Write-Host (" {0,-14} " -f $latest) -NoNewline -ForegroundColor Green
+            Write-Host "│ " -NoNewline -ForegroundColor DarkGray
+            Write-Host "winget upgrade --id " -NoNewline -ForegroundColor DarkCyan
             Write-Host $commandId -ForegroundColor Cyan
+            
+            $count++
         } catch { }
     }
 
     Write-Host " $separator" -ForegroundColor DarkGray
-    Write-Host " 💡 Total items found: $(($raw.Count - $dataStart - 1))" -ForegroundColor Gray
+    Write-Host " 💡 Total: $count updates found. Run 'uw' to update all." -ForegroundColor Gray
     Write-Host ""
 }
 
@@ -1371,132 +1962,256 @@ function ConvertFrom-SourceTable {
 function Show-JsonVisual {
     param(
         [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
-        [string]$Path
+        [string]$Path,
+        [Parameter(Mandatory=$false)]
+        [int]$MaxDepth = 4
     )
 
     try {
         $fullPath = Resolve-Path $Path
         $data = Get-Content $fullPath -Raw | ConvertFrom-Json
     } catch {
-        Write-Host " ❌ Error: The file is not a valid JSON or does not exist." -ForegroundColor Red
+        Write-Host "  ❌ Error: Invalid JSON or file not found." -ForegroundColor Red
         return
     }
 
-    Write-Host "`n 󰘦  Visualizing: $(Split-Path $fullPath -Leaf)" -ForegroundColor Magenta
-    Write-Host " ──────────────────────────────────────────────────" -ForegroundColor DarkGray
+    $fileName = Split-Path $fullPath -Leaf
+    Write-Host "`n  󰘦  JSON STRUCTURE: $fileName" -ForegroundColor Magenta
+    Write-Host ("  " + ("─" * 60)) -ForegroundColor DarkGray
 
     function Invoke-DrawNode {
-        param($Object, $Indent = "")
+        param($Object, $Indent = "", $CurrentDepth = 0)
+
+        if ($CurrentDepth -gt $MaxDepth) {
+            Write-Host " [...] (Max Depth Reached)" -ForegroundColor DarkGray
+            return
+        }
 
         if ($Object -is [PSCustomObject] -or $Object -is [System.Collections.IDictionary]) {
-            $properties = $Object | Get-Member -MemberType NoteProperty, Property
-            $count = $properties.Count
+            $props = $Object | Get-Member -MemberType NoteProperty, Property
+            $count = $props.Count
             $i = 0
 
-            foreach ($p in $properties) {
+            foreach ($p in $props) {
                 $i++
                 $isLast = ($i -eq $count)
-
-                $connector = if ($isLast) { " └── " } else { " ├── " }
-                $space = if ($isLast) { "     " } else { " │   " }
-                $nextIndent = $Indent + $space
-
+                $connector = if ($isLast) { "└── " } else { "├── " }
+                
                 Write-Host "$Indent$connector" -NoNewline -ForegroundColor DarkGray
                 Write-Host "$($p.Name): " -NoNewline -ForegroundColor Cyan
                 
-                $val = $Object.$($p.Name)
-                if ($val -is [PSCustomObject] -or $val -is [Array]) {
-                    Write-Host "󰅂" -ForegroundColor DarkGray
-                    Invoke-DrawNode -Object $val -Indent $nextIndent
-                } else {
-                    Write-Host $val -ForegroundColor White
-                }
+                Render-Value -Value $Object.$($p.Name) -Indent $Indent -IsLast $isLast -CurrentDepth $CurrentDepth
             }
         }
         elseif ($Object -is [Array]) {
             $count = $Object.Count
-            for ($j=0; $j -lt $count; $j++) {
-                $isLast = ($j -eq $count -1)
+            $limit = if ($count -gt 10) { 10 } else { $count }
+            
+            for ($j=0; $j -lt $limit; $j++) {
+                $isLast = ($j -eq $count -1 -or $j -eq 9)
+                $connector = if ($isLast) { "└── " } else { "├── " }
                 
-                $connector = if ($isLast) { " └── " } else { " ├── " }
-                $space = if ($isLast) { "     " } else { " │   " }
-                $nextIndent = $Indent + $space
-
                 Write-Host "$Indent$connector" -NoNewline -ForegroundColor DarkGray
                 Write-Host "[$j] " -NoNewline -ForegroundColor Yellow
                 
-                $item = $Object[$j]
-                if ($item -is [PSCustomObject] -or $item -is [Array]) {
-                    Write-Host "󰅂" -ForegroundColor DarkGray
-                    Invoke-DrawNode -Object $item -Indent $nextIndent
-                } else {
-                    Write-Host $item -ForegroundColor White
-                }
+                Render-Value -Value $Object[$j] -Indent $Indent -IsLast $isLast -CurrentDepth $CurrentDepth
+            }
+            if ($count -gt 10) {
+                $pad = if ($Indent) { $Indent + "    " } else { "    " }
+                Write-Host "$pad... and $($count - 10) more items" -ForegroundColor DarkGray
             }
         }
     }
 
+    function Render-Value {
+        param($Value, $Indent, $IsLast, $CurrentDepth)
+
+        $extender = "│   "
+        if ($IsLast) { $extender = "    " }
+        $nextIndent = $Indent + $extender
+
+        if ($null -eq $Value) {
+            Write-Host "null" -ForegroundColor DarkRed
+        }
+        elseif ($Value -is [PSCustomObject] -or $Value -is [Array]) {
+            Write-Host "󰅂" -ForegroundColor DarkGray
+            Invoke-DrawNode -Object $Value -Indent $nextIndent -CurrentDepth ($CurrentDepth + 1)
+        }
+        elseif ($Value -is [bool]) {
+            $boolColor = if ($Value) { "Green" } else { "Red" }
+            Write-Host $Value.ToString().ToLower() -ForegroundColor $boolColor
+        }
+        elseif ($Value -as [double] -ne $null) {
+            Write-Host $Value -ForegroundColor Magenta
+        }
+        else {
+            Write-Host "`"$Value`"" -ForegroundColor White
+        }
+    }
+
     Invoke-DrawNode -Object $data
-    Write-Host " ──────────────────────────────────────────────────`n" -ForegroundColor DarkGray
+    Write-Host ("  " + ("─" * 60)) -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 function Show-LogVisual {
-    param([Parameter(Mandatory=$true)][string]$Path)
-    if (!(Test-Path $Path)) { Write-Host " ❌ File not found." -ForegroundColor Red; return }
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$Path,
+        [Parameter(Mandatory=$false)]
+        [int]$Lines = 25,
+        [Parameter(Mandatory=$false)]
+        [switch]$Wait
+    )
 
-    Write-Host "`n   Reading Log: $(Split-Path $Path -Leaf)" -ForegroundColor Magenta
-    Write-Host " ──────────────────────────────────────────────────" -ForegroundColor DarkGray
-
-    Get-Content $Path | ForEach-Object {
-        $line = $_
-        if ($line -match "ERROR|Critical|Failed") { Write-Host $line -ForegroundColor Red }
-        elseif ($line -match "WARN|Warning") { Write-Host $line -ForegroundColor Yellow }
-        elseif ($line -match "INFO|Success") { Write-Host $line -ForegroundColor Cyan }
-        else { Write-Host $line -ForegroundColor Gray }
+    if (-not (Test-Path $Path)) { 
+        Write-Host "`n  ❌ File not found: $Path" -ForegroundColor Red
+        return 
     }
-    Write-Host " ──────────────────────────────────────────────────`n" -ForegroundColor DarkGray
+
+    $fileName = Split-Path $Path -Leaf
+    $sep = "  " + ("─" * 75)
+
+    Write-Host "`n    LOG SENTINEL: $fileName" -ForegroundColor Magenta
+    if ($Wait) { Write-Host "  👀 Mode: Live Follow (Press Ctrl+C to stop)" -ForegroundColor Yellow }
+    else { Write-Host "  📄 Showing last $Lines lines" -ForegroundColor Gray }
+    Write-Host $sep -ForegroundColor DarkGray
+
+    $ProcessLine = {
+        param($line)
+        if ($line -match "ERROR|Critical|Failed|Exception|Error:") { 
+            Write-Host "    $line" -ForegroundColor Red 
+        }
+        elseif ($line -match "WARN|Warning|Alert") { 
+            Write-Host "    $line" -ForegroundColor Yellow 
+        }
+        elseif ($line -match "INFO|Success|Done|Completed") { 
+            Write-Host "    $line" -ForegroundColor Cyan 
+        }
+        elseif ($line -match "\d{2}:\d{2}:\d{2}") {
+            Write-Host "  󱑂  $line" -ForegroundColor Gray
+        }
+        else { 
+            Write-Host "     $line" -ForegroundColor DarkGray 
+        }
+    }
+
+    try {
+        if ($Wait) {
+            Get-Content $Path -Tail $Lines -Wait | ForEach-Object { & $ProcessLine $_ }
+        } else {
+            Get-Content $Path -Tail $Lines | ForEach-Object { & $ProcessLine $_ }
+            Write-Host $sep -ForegroundColor DarkGray
+            Write-Host "  💡 Tip: Use 'slv path -Wait' to follow the log in real-time." -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Write-Host "`n  Finished reading log." -ForegroundColor Gray
+    }
+    Write-Host ""
 }
 
 function Show-CsvVisual {
-    param([Parameter(Mandatory=$true)][string]$Path)
+    param(
+        [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+        [string]$Path
+    )
+    
+    if (-not (Test-Path $Path)) {
+        Write-Host "  ❌ File not found: $Path" -ForegroundColor Red
+        return
+    }
+
     try {
         $fullPath = Resolve-Path $Path
-        $data = Import-Csv $fullPath
-        $count = ($data | Measure-Object).Count
+        $fileName = Split-Path $fullPath -Leaf
 
-        Write-Host "`n   CSV Data: $(Split-Path $fullPath -Leaf) ($count registros)" -ForegroundColor Cyan
-        
-        if ($count -gt 50) {
-            Write-Host " 󰆼  Launching standalone browser..." -ForegroundColor DarkGray
-            Start-Process powershell -ArgumentList "-NoProfile -Command `"Import-Csv '$fullPath' | Out-GridView -Title 'CSV Explorer: $(Split-Path $fullPath -Leaf)'`"" -WindowStyle Hidden
-            
-            Write-Host " ✅ Open browser. Free terminal." -ForegroundColor Green
-        } else {
-            $data | Format-Table -AutoSize
+        $sample = Get-Content $fullPath -TotalCount 2
+        $delimiter = ","
+        if ($sample -match ";") { $delimiter = ";" }
+        elseif ($sample -match "\t") { $delimiter = "`t" }
+
+        $data = Import-Csv $fullPath -Delimiter $delimiter
+        $count = ($data | Measure-Object).Count
+        $sep = "  " + ("─" * 70)
+
+        Write-Host "`n    CSV EXPLORER: $fileName" -ForegroundColor Cyan
+        Write-Host $sep -ForegroundColor DarkGray
+        Write-Host "  📊 Records: $count  |  󰉿 Delim: '$delimiter'" -ForegroundColor Gray
+        Write-Host $sep -ForegroundColor DarkGray
+
+        if ($count -eq 0) {
+            Write-Host "  ⚠️  Empty file." -ForegroundColor Yellow
         }
-    } catch {
-        Write-Host " ❌ Error reading CSV. Check the delimiter." -ForegroundColor Red
+        elseif ($count -gt 50) {
+            Write-Host "  󰆼  Launching Out-GridView..." -ForegroundColor Magenta
+            $cmd = "Import-Csv '$fullPath' -Delimiter '$delimiter' | Out-GridView -Title 'CSV: $fileName'"
+            Start-Process powershell -ArgumentList "-NoProfile", "-Command", $cmd -WindowStyle Hidden
+        }
+        else {
+            $data | Select-Object * | Format-Table -AutoSize
+        }
     }
+    catch {
+        Write-Host "  ❌ Critical Error: $($_.Exception.Message)" -ForegroundColor Red
+    }
+    Write-Host ""
 }
 
 function Show-ProcessVisual {
-    Write-Host "`n   Active Process Monitor" -ForegroundColor Magenta
-    Write-Host " ──────────────────────────────────────────────────" -ForegroundColor DarkGray
+    $lineSep = "  " + ("─" * 70)
+    
+    try {
+        while ($true) {
+            [Console]::Clear() 
+            
+            Write-Host "`n    ACTIVE PROCESS MONITOR (Top 10 by CPU)" -ForegroundColor Magenta
+            Write-Host $lineSep -ForegroundColor DarkGray
 
-    Get-Process | Sort-Object CPU -Descending | Select-Object -First 20 | ForEach-Object {
-        $mem = [Math]::Round($_.WorkingSet / 1MB, 2)
-        $cpu = [Math]::Round($_.CPU, 1)
+            $cpuCounter = Get-Counter '\Process(*)\% Processor Time' -ErrorAction SilentlyContinue
+            $numCores = $env:NUMBER_OF_PROCESSORS
+            
+            $topProcesses = Get-Process | ForEach-Object {
+                $pName = $_.Name
+                $cpuVal = 0
+                $match = $cpuCounter.CounterSamples | Where-Object { $_.InstanceName -eq $pName } | Select-Object -First 1
+                if ($match) { $cpuVal = [Math]::Round($match.CookedValue / $numCores, 1) }
+                
+                [PSCustomObject]@{
+                    Name = if ($pName.Length -gt 22) { $pName.Substring(0, 19) + "..." } else { $pName }
+                    CPU  = $cpuVal
+                    Mem  = [Math]::Round($_.WorkingSet / 1MB, 1)
+                }
+            } | Sort-Object CPU -Descending | Select-Object -First 10
 
-        $color = "White"
-        if ($mem -gt 500) { $color = "Yellow" }
-        if ($mem -gt 1000) { $color = "Red" }
+            Write-Host ("    {0,-25} │ {1,-8} │ {2,-12} │ {3}" -f "PROCESS", "CPU %", "MEMORY", "RAM BAR") -ForegroundColor DarkCyan
+            Write-Host ("    " + ("─" * 66)) -ForegroundColor DarkGray
 
-        Write-Host "  " -NoNewline -ForegroundColor DarkGray
-        Write-Host "$($_.Name.PadRight(25))" -NoNewline -ForegroundColor Cyan
-        Write-Host "   $($cpu.ToString().PadLeft(6)) s" -NoNewline -ForegroundColor Gray
-        Write-Host " 󰍛  $($mem.ToString().PadLeft(8)) MB" -ForegroundColor $color
+            foreach ($p in $topProcesses) {
+                $cpuColor = if ($p.CPU -gt 20) { "Red" } elseif ($p.CPU -gt 5) { "Yellow" } else { "Gray" }
+                $memColor = if ($p.Mem -gt 1024) { "Magenta" } else { "White" }
+                $barPoints = [Math]::Min([Math]::Floor($p.Mem / 512), 10)
+                $bar = ("█" * $barPoints) + ("░" * (10 - $barPoints))
+
+                Write-Host "   " -NoNewline -ForegroundColor DarkGray
+                Write-Host ("{0,-23} " -f $p.Name) -NoNewline -ForegroundColor Cyan
+                Write-Host " │ " -NoNewline -ForegroundColor DarkGray
+                Write-Host ("{0,6}% " -f $p.CPU) -NoNewline -ForegroundColor $cpuColor
+                Write-Host " │ " -NoNewline -ForegroundColor DarkGray
+                Write-Host ("{0,8} MB " -f $p.Mem) -NoNewline -ForegroundColor $memColor
+                Write-Host " │ " -NoNewline -ForegroundColor DarkGray
+                Write-Host "[$bar]" -ForegroundColor DarkGray
+            }
+
+            Write-Host $lineSep -ForegroundColor DarkGray
+            Write-Host "  [Ctrl+C] Stop  |  Refreshing every 2s..." -ForegroundColor DarkGray
+            
+            Start-Sleep -Seconds 2
+        }
     }
-    Write-Host " ──────────────────────────────────────────────────`n" -ForegroundColor DarkGray
+    catch {
+        Write-Host "`n  Monitor closed." -ForegroundColor Gray
+    }
 }
 
 # ========================================================================
@@ -1542,6 +2257,7 @@ Set-Alias kill Invoke-KillProcess
 Set-Alias gs Get-GitStatusSummary
 Set-Alias newp New-Project
 Set-Alias keys Get-WezKeybinds
+Set-Alias hi Get-InstallHistory
 
 # ========================================================================
 # 6. Execute in Start and Exit
