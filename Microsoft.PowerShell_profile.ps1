@@ -320,8 +320,6 @@ function Get-InstallMethod {
     }
 }
 
-Set-Alias "whereis" Get-InstallMethod
-
 # ========================================================================
 # 4. KEY HANDLERS (Shortcuts)
 # ------------------------------------------------------------------------
@@ -599,13 +597,13 @@ function remind {
 }
 
 function Get-RepoStats {
-    param([string]$repoName = "")
+    param(
+        [string]$repoName = "",
+        [switch]$View
+    )
 
     $token = $env:GITHUB
-    if (-not $token) {
-        Write-Host "❌ Error: `$env:GITHUB` variable not found." -ForegroundColor Red
-        return
-    }
+    if (-not $token) { Write-Host "❌ Error: `$env:GITHUB` not found." -ForegroundColor Red; return }
 
     $headers = @{ 
         "Authorization" = "token $token"
@@ -614,63 +612,98 @@ function Get-RepoStats {
     }
 
     if (-not $repoName) {
-        Write-Host "🔍 Searching your repositories..." -ForegroundColor Cyan
         try {
             $myRepos = Invoke-RestMethod -Uri "https://api.github.com/user/repos?per_page=100&sort=updated" -Headers $headers
             $repoName = $myRepos | Select-Object -ExpandProperty full_name | fzf --reverse --header "Select a repository"
             if (-not $repoName) { return }
         } catch {
-            Write-Host "❌ Error listing repos: $($_.Exception.Message)" -ForegroundColor Red
-            return
+            Write-Host "❌ Could not list repositories." -ForegroundColor Red; return
         }
     }
 
+    $repoName = $repoName.Trim()
+
+    if ($View) {
+        $type = @("Issues", "Pull Requests") | fzf --reverse --height 10% --header "What do you want to browse?"
+        if (-not $type) { return }
+
+        $queryType = if ($type -eq "Issues") { "is:issue" } else { "is:pr" }
+        $searchUri = "https://api.github.com/search/issues?q=repo:$repoName+$queryType+is:open"
+        
+        try {
+            Write-Host "  🔍 Searching $type..." -ForegroundColor DarkGray
+            $response = Invoke-RestMethod -Uri $searchUri -Headers $headers -ErrorAction Stop
+            $items = $response.items
+            
+            if ($null -eq $items -or $items.Count -eq 0) { 
+                Write-Host "`n  󰅚 No open $type found in $repoName." -ForegroundColor Yellow
+                return 
+            }
+
+            $selected = $items | ForEach-Object { 
+                "$($_.number.ToString().PadRight(5)) | $($_.user.login.PadRight(15)) | $($_.title)" 
+            } | fzf --reverse --header "SELECT AN ITEM TO VIEW DETAILS" --preview-window=top:60%
+
+            if ($selected) {
+                $number = ($selected -split " \| ")[0].Trim()
+                $detail = $items | Where-Object { $_.number -eq $number }
+                
+                Clear-Host
+                Write-Host "`n  #$($detail.number): $($detail.title)" -ForegroundColor Magenta
+                Write-Host "  Author: $($detail.user.login) | Created: $([DateTime]$detail.created_at)" -ForegroundColor DarkGray
+                Write-Host "  " + ("-" * 60) -ForegroundColor DarkGray
+                
+                if ($detail.body) {
+                    $detail.body | bat --language md --style=plain
+                } else {
+                    Write-Host "  (No description provided)" -ForegroundColor DarkGray
+                }
+                
+                Write-Host "`n  🔗 URL: $($detail.html_url)" -ForegroundColor Cyan
+            }
+        } catch {
+            Write-Host "`n  󰅚 GitHub API Error: Could not access repository search." -ForegroundColor Red
+            Write-Host "  Verify the repo name '$repoName' and ensure your token has proper permissions." -ForegroundColor DarkGray
+        }
+        return
+    }
+
     Write-Host "📊 Fetching data for $repoName..." -ForegroundColor Yellow
-    
     try {
-        $mainInfo      = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName" -Headers $headers
+        $mainInfo     = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName" -Headers $headers
         $trafficClones = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/traffic/clones" -Headers $headers
         $trafficViews  = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/traffic/views" -Headers $headers
         $releases      = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/releases" -Headers $headers
+        $pulls         = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/pulls?state=open" -Headers $headers
         
-        $lastPush = "N/A"
-        if ($mainInfo.pushed_at) {
-            $lastPush = ([DateTime]$mainInfo.pushed_at).ToString("MM/dd/yyyy HH:mm")
-        }
-
-        $totalDownloads = 0
-        if ($releases) {
-            foreach ($rel in $releases) {
-                foreach ($asset in $rel.assets) {
-                    $totalDownloads += $asset.download_count
-                }
-            }
-        }
+        $prCount = $pulls.Count
+        $actualIssues = $mainInfo.open_issues_count - $prCount
+        $lastPush = if ($mainInfo.pushed_at) { ([DateTime]$mainInfo.pushed_at).ToString("MM/dd/yyyy HH:mm") } else { "N/A" }
 
         Clear-Host
         Write-Host "`n  🚀 REPOSITORY STATISTICS" -ForegroundColor Magenta
-        Write-Host "  " + ("=" * 40) -ForegroundColor DarkGray
+        Write-Host "  " + ("=" * 45) -ForegroundColor DarkGray
         Write-Host "  📦 Repository : " -NoNewline; Write-Host $repoName -ForegroundColor Cyan
-        Write-Host "  " + ("-" * 40) -ForegroundColor DarkGray
+        Write-Host "  " + ("-" * 45) -ForegroundColor DarkGray
 
         $stats = @(
-            @{ Icon = "⭐"; Label = "Stars      "; Value = $mainInfo.stargazers_count; Color = "Yellow" }
-            @{ Icon = "🍴"; Label = "Forks      "; Value = $mainInfo.forks_count; Color = "Blue" }
-            @{ Icon = "👀"; Label = "Views (14d)"; Value = "$($trafficViews.count) ($($trafficViews.uniques) unique)"; Color = "Green" }
-            @{ Icon = "👥"; Label = "Clones(14d)"; Value = "$($trafficClones.count) ($($trafficClones.uniques) unique)"; Color = "Magenta" }
-            @{ Icon = "📥"; Label = "Downloads  "; Value = $totalDownloads; Color = "White" }
-            @{ Icon = "📅"; Label = "Last Push  "; Value = $lastPush; Color = "Cyan" }
+            @{ Icon = "⭐"; Label = "Stars       "; Value = $mainInfo.stargazers_count; Color = "Yellow" }
+            @{ Icon = "🍴"; Label = "Forks       "; Value = $mainInfo.forks_count; Color = "Blue" }
+            @{ Icon = "🐞"; Label = "Open Issues "; Value = $actualIssues; Color = "Red" }
+            @{ Icon = "🔀"; Label = "Open PRs    "; Value = $prCount; Color = "Green" }
+            @{ Icon = "👀"; Label = "Views (14d) "; Value = "$($trafficViews.count) ($($trafficViews.uniques) unique)"; Color = "Green" }
+            @{ Icon = "📅"; Label = "Last Push   "; Value = $lastPush; Color = "Cyan" }
         )
 
         foreach ($s in $stats) {
             Write-Host "  $($s.Icon) $($s.Label) : " -NoNewline
             Write-Host $s.Value -ForegroundColor $s.Color
         }
-        Write-Host "  " + ("=" * 40) -ForegroundColor DarkGray
-        Write-Host ""
+        Write-Host "`n  💡 Tip: Use 'rs -View' to browse Issues/PRs" -ForegroundColor DarkGray
+        Write-Host "  " + ("=" * 45) -ForegroundColor DarkGray
 
     } catch {
-        Write-Host "❌ Detailed Error: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "❌ Error: $($_.Exception.Message)" -ForegroundColor Red
     }
 }
 
@@ -980,56 +1013,59 @@ function help-system {
         }
     }
 
-    Write-Host "`n  󰙅  NAVIGATION & FILES" -ForegroundColor Cyan
+    # 1. NAVIGATION & SEARCH
+    Write-Host "`n  󰙅  NAVIGATION & SEARCH" -ForegroundColor Cyan
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
     Out-Cmd @(
         @{ Cmd = "l / ll / la"; Desc = "List files (eza) with icons/details" },
-        @{ Cmd = ".. [n]";      Desc = "Go up 'n' levels in directories" },
-        @{ Cmd = "mcd <dir>";   Desc = "Create directory and enter it immediately" },
-        @{ Cmd = "ff";          Desc = "Fuzzy search files and open in VS Code" },
-        @{ Cmd = "extr <file>"; Desc = "Extract compressed files (zip, rar, 7z...)" },
-        @{ Cmd = "zap <path>";   Desc = "Atomic Delete: Forcefully remove files/folders with live progress" },
-        @{ Cmd = "find";         Desc = "Quick Search: Find file and choose (Open/Copy/Go)" },
-        @{ Cmd = "gs";           Desc = "Git Summary: Scan all subfolders for git status" },
-        @{ Cmd = "newp [path]";  Desc = "Project Architect: Interactive scaffolding for dev projects" }
+        @{ Cmd = ".. [n] / p";  Desc = "Go up 'n' levels / Project Navigator" },
+        @{ Cmd = "ff / find";   Desc = "Fuzzy find to Open (Code) or Action (o/c/g)" },
+        @{ Cmd = "fp <text>";   Desc = "Find Text: Search inside files (ripgrep)" },
+        @{ Cmd = "mcd / zap";   Desc = "Smart Create Dir / Atomic Force-Delete" }
     )
 
-    Write-Host "`n  󰘚  SYSTEM & VISUALIZATION" -ForegroundColor Yellow
+    # 2. DEVELOPMENT & GITHUB
+    Write-Host "`n  󰊢  DEVELOPMENT ARCHITECT" -ForegroundColor Blue
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
     Out-Cmd @(
-        @{ Cmd = "welcome";     Desc = "Show system dashboard / Neofetch style" },
-        @{ Cmd = "ps";          Desc = "Top 20 process monitor with CPU/RAM icons" },
-        @{ Cmd = "jv <file>";   Desc = "Visualize JSON structure in tree view" },
-        @{ Cmd = "lv <file>";   Desc = "Log viewer with smart color-coding" },
-        @{ Cmd = "cv <file>";   Desc = "CSV table viewer or GUI explorer" },
-        @{ Cmd = "wup";         Desc = "Scan and display Winget updates visually" }
+        @{ Cmd = "newp";         Desc = "Architect: Scaffolding (Flutter, Rust, Vite...)" },
+        @{ Cmd = "rs [-View]";   Desc = "GitHub: Repo stats or interactive Issues/PRs" },
+        @{ Cmd = "gs / va";      Desc = "Git Status Summary / Activate Python venv" },
+        @{ Cmd = "t [task]";     Desc = "Task Manager: Add or manage your To-Do list" },
+        @{ Cmd = "keys";         Desc = "WezTerm Guide: Show terminal shortcuts" }
     )
 
+    # 3. VISUALIZERS & MONITORING
+    Write-Host "`n  󰘚  VISUALIZERS & MONITORING" -ForegroundColor Yellow
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Out-Cmd @(
+        @{ Cmd = "jv / cv / lv"; Desc = "Visualizers: JSON tree / CSV table / Log colors" },
+        @{ Cmd = "pv / ps";      Desc = "Monitor: Top 20 Process / Service monitor" },
+        @{ Cmd = "wup";          Desc = "Winget: Visual scanner for pending updates" },
+        @{ Cmd = "myip / ports"; Desc = "Network: IP info / Listening TCP ports" },
+        @{ Cmd = "st / w";       Desc = "Visual: Set Terminal Scheme / Weather" }
+    )
+
+    # 4. MAINTENANCE & SHORTCUTS
     Write-Host "`n  󰠵  MAINTENANCE & TOOLS" -ForegroundColor Green
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
     Out-Cmd @(
-        @{ Cmd = "reload / ep"; Desc = "Reload / Edit `$PROFILE` in VS Code" },
-        @{ Cmd = "us / uw / uc"; Desc = "Update managers: Scoop / Winget / Choco" },
-        @{ Cmd = "whereis";     Desc = "Check if app was installed via Package Manager" },
-        @{ Cmd = "myip / ports"; Desc = "Network info / Active listening ports" },
-        @{ Cmd = "kill";         Desc = "Sniper Mode: Select and force-kill processes via FZF" }
+        @{ Cmd = "us / uw / uc"; Desc = "Update: Scoop / Winget / Choco (Silent)" },
+        @{ Cmd = "reload / ep";  Desc = "Reload Shell / Edit Profile in Code" },
+        @{ Cmd = "hix / ed";     Desc = "History Exec / Edit file fast via FZF" },
+        @{ Cmd = "kill";         Desc = "Sniper Mode: Select and kill process via FZF" },
+        @{ Cmd = "whereis";      Desc = "Search installation source of any app" }
     )
 
+    # 5. HOTKEYS
     Write-Host "`n  󰌌  KEYBOARD SHORTCUTS" -ForegroundColor Magenta
     Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "    [Ctrl + T]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Fuzzy file search & copy path"
-    Write-Host "    [Ctrl + G]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Interactive folder navigation (zoxide)"
-    Write-Host "    [Ctrl + R]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Smart history search"
-    Write-Host "    [Ctrl + L]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Clear screen (Native)"
+    Write-Host "    [Ctrl + T]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Fuzzy file search & Copy Path"
+    Write-Host "    [Ctrl + G]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Interactive Folder History (Zoxide)"
+    Write-Host "    [Ctrl + U]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Extract URLs from history & Copy"
+    Write-Host "    [Ctrl + R]  " -ForegroundColor Yellow -NoNewline; Write-Host "│ Smart History search"
 
-    Write-Host "`n  󰚌  EXTRA PROTOCOLS" -ForegroundColor Blue
-    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
-    Write-Host "    w           " -ForegroundColor Yellow -NoNewline; Write-Host "│ Full 3-day weather forecast"
-    Write-Host "    ed          " -ForegroundColor Yellow -NoNewline; Write-Host "│ Quick-edit file in VS Code using FZF"
-    Write-Host "    hix         " -ForegroundColor Yellow -NoNewline; Write-Host "| Search history and EXECUTE immediately"
-    Write-Host "    matrix      " -ForegroundColor Yellow -NoNewline; Write-Host "│ Enter digital rain mode (cmatrix)"
-    
-    Write-Host "`n  Type 'help' anytime to see this menu.`n" -ForegroundColor DarkGray
+    Write-Host "`n  Type 'help' or 'h' anytime to see this guide.`n" -ForegroundColor DarkGray
 }
 
 function welcome {
@@ -1199,6 +1235,45 @@ function welcome {
     Write-Host "`n  Type 'help' or 'h' anytime to see help menu.`n" -ForegroundColor DarkGray
     Write-Host ""
 
+}
+
+function Get-WezKeybinds {
+    Clear-Host
+    Write-Host "`n  󱊖  WEZTERM SHORTCUTS GUIDE" -ForegroundColor Magenta
+    Write-Host "  ================================================================" -ForegroundColor DarkGray
+
+    function Out-Key ($K, $M, $D) {
+        $keyText = "    [$M + $K]".PadRight(25)
+        Write-Host $keyText -ForegroundColor Yellow -NoNewline
+        Write-Host " │ " -ForegroundColor DarkGray -NoNewline
+        Write-Host $D -ForegroundColor White
+    }
+
+    Write-Host "`n  󰝤  PANELS & SPLITS" -ForegroundColor Cyan
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Out-Key "D"         "ALT+SHIFT"  "Split Horizontal"
+    Out-Key "S"         "ALT+SHIFT"  "Split Vertical"
+    Out-Key "Z"         "CTRL+SHIFT" "Toggle Zoom (Maximize Pane)"
+    Out-Key "Q"         "CTRL+SHIFT" "Close Current Pane"
+    Out-Key "B"         "CTRL"       "Rotate Panes (Counter-Clockwise)"
+
+    Write-Host "`n  󰜂  NAVIGATION" -ForegroundColor Green
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Out-Key "Arrows"    "ALT"        "Activate Pane (Left/Right/Up/Down)"
+    Out-Key "L/R Arrow" "ALT+SHIFT"  "Switch Tab (Previous/Next)"
+    Out-Key "N"         "ALT"        "Show Tab Navigator"
+    Out-Key "L"         "ALT"        "Show Launcher (Tabs/Workspaces)"
+
+    Write-Host "`n  󰩨  PANE RESIZING" -ForegroundColor Blue
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Out-Key "Arrows"    "CTRL+ALT"   "Adjust Pane Size (5 units)"
+
+    Write-Host "`n  󰓩  SYSTEM & TABS" -ForegroundColor Yellow
+    Write-Host "  ----------------------------------------------------------------" -ForegroundColor DarkGray
+    Out-Key "T"         "ALT+SHIFT"  "New Tab (Current Domain)"
+    Out-Key "F"         "CTRL+SHIFT" "Toggle FullScreen"
+
+    Write-Host "`n  Tip: Use 'ALT+N' for a visual tab overview.`n" -ForegroundColor DarkGray
 }
 
 function Check-WingetVisual {
@@ -1465,6 +1540,7 @@ Set-Alias find Invoke-QuickSearch
 Set-Alias kill Invoke-KillProcess
 Set-Alias gs Get-GitStatusSummary
 Set-Alias newp New-Project
+Set-Alias keys Get-WezKeybinds
 
 # ========================================================================
 # 6. Execute in Start and Exit
