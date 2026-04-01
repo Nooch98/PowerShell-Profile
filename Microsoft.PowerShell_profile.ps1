@@ -995,15 +995,29 @@ function Get-RepoStats {
 
     $headers = @{ 
         "Authorization" = "token $token"
-        "Accept"        = "application/vnd.github.v3+json"
+        "Accept"         = "application/vnd.github.v3+json"
         "User-Agent"    = "PowerShell-CLI"
     }
 
     if (-not $repoName) {
         try {
             $myRepos = Invoke-RestMethod -Uri "https://api.github.com/user/repos?per_page=100&sort=updated" -Headers $headers
-            $repoName = $myRepos | Select-Object -ExpandProperty full_name | fzf --reverse --header "Select a repository"
+            
+            $fzfOut = $myRepos | Select-Object -ExpandProperty full_name | fzf --reverse `
+                --header "ENTER: Stats | CTRL-G: Clone repo" `
+                --expect="ctrl-g"
+
+            $key = $fzfOut[0]
+            $repoName = $fzfOut[1]
+
             if (-not $repoName) { return }
+
+            if ($key -eq "ctrl-g") {
+                Write-Host "`n  📥 Cloning $repoName..." -ForegroundColor Cyan
+                git clone "https://github.com/$( $repoName ).git"
+                return
+            }
+
         } catch {
             Write-Host "❌ Could not list repositories." -ForegroundColor Red; return
         }
@@ -1051,7 +1065,6 @@ function Get-RepoStats {
             }
         } catch {
             Write-Host "`n  󰅚 GitHub API Error: Could not access repository search." -ForegroundColor Red
-            Write-Host "  Verify the repo name '$repoName' and ensure your token has proper permissions." -ForegroundColor DarkGray
         }
         return
     }
@@ -1063,6 +1076,10 @@ function Get-RepoStats {
         $trafficViews  = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/traffic/views" -Headers $headers
         $releases      = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/releases" -Headers $headers
         $pulls         = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/pulls?state=open" -Headers $headers
+
+        $releaseText = if ($releases.Count -gt 0) { 
+            "$($releases[0].tag_name) (Total: $($releases.Count))" 
+        } else { "None" }
         
         $prCount = $pulls.Count
         $actualIssues = $mainInfo.open_issues_count - $prCount
@@ -1075,6 +1092,7 @@ function Get-RepoStats {
         Write-Host "  " + ("-" * 45) -ForegroundColor DarkGray
 
         $stats = @(
+            @{ Icon = "📦"; Label = "Releases    "; Value = $releaseText; Color = "Cyan"}
             @{ Icon = "⭐"; Label = "Stars       "; Value = $mainInfo.stargazers_count; Color = "Yellow" }
             @{ Icon = "🍴"; Label = "Forks       "; Value = $mainInfo.forks_count; Color = "Blue" }
             @{ Icon = "🐞"; Label = "Open Issues "; Value = $actualIssues; Color = "Red" }
@@ -1097,8 +1115,8 @@ function Get-RepoStats {
 }
 
 function Set-TerminalScheme {
+    $repoUrl = "https://raw.githubusercontent.com/Nooch98/PowerShell-Profile/main/themes.json"
     $wtPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
-
     if (-not (Test-Path $wtPath)) {
         $wtPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe\LocalState\settings.json"
     }
@@ -1113,52 +1131,70 @@ function Set-TerminalScheme {
         $cleanJson = $rawJson -replace '(?m)^\s*//.*|(?m)\s//.*', ''
         $settings = $cleanJson | ConvertFrom-Json
         
-        $schemes = $settings.schemes
-        if (-not $schemes) { 
-            Write-Host "  󰅚 No schemes defined in your settings.json" -ForegroundColor Yellow
-            return 
+        Write-Host "`n  󰛖  Fetching cloud themes..." -ForegroundColor DarkGray -NoNewline
+        try {
+            $response = Invoke-RestMethod -Uri $repoUrl -TimeoutSec 3
+            $cloudSchemes = $response.schemes
+            Write-Host " Done." -ForegroundColor Green
+        } catch {
+            Write-Host " Offline." -ForegroundColor Yellow
+            $cloudSchemes = @()
         }
 
-        $selectedName = $schemes | ForEach-Object { "$($_.name.PadRight(20)) │ BG: $($_.background) FG: $($_.foreground)" } | 
-            fzf --reverse --height 45% `
-                --header "📺 SELECT TERMINAL SCHEME (Enter to Apply)" `
-                --border --prompt="🎨 Scheme > " | 
-            ForEach-Object { $_.Split('│')[0].Trim() }
-        
-        if (-not $selectedName) { return }
+        $localNames = $settings.schemes.name
+        $allSchemes = @()
+        foreach ($s in $settings.schemes) {
+            $s | Add-Member -MemberType NoteProperty -Name "Source" -Value "󰋜" -Force
+            $allSchemes += $s
+        }
+        foreach ($s in $cloudSchemes) {
+            if ($s.name -notin $localNames) {
+                $s | Add-Member -MemberType NoteProperty -Name "Source" -Value "󰅟" -Force
+                $allSchemes += $s
+            }
+        }
 
-        $s = $schemes | Where-Object { $_.name -eq $selectedName }
+        $selection = $allSchemes | ForEach-Object { 
+            "$($_.Source) $($_.name)".PadRight(30) + " │ BG: $($_.background) FG: $($_.foreground)" 
+        } | fzf --reverse --height 50% --header "🎨 SCHEME SELECTOR" --border --prompt="🎨 > "
+
+        if (-not $selection) { return }
+        $selectedName = $selection.Split('│')[0].Trim().Substring(2).Trim()
+        $s = $allSchemes | Where-Object { $_.name -eq $selectedName }
+
+        if ($s.Source -eq "󰅟") {
+            Write-Host "  󰇚  Installing $selectedName..." -ForegroundColor Cyan
+            $newS = $s | Select-Object * -ExcludeProperty Source
+            $tempList = [System.Collections.Generic.List[PSCustomObject]]@($settings.schemes)
+            $tempList.Add($newS)
+            $settings.schemes = $tempList
+        }
 
         $osc = [char]27 + "]"
         $bel = [char]7
-        
-        Write-Host -NoNewline "${osc}10;$($s.foreground)${bel}"
-        Write-Host -NoNewline "${osc}11;$($s.background)${bel}"
-        Write-Host -NoNewline "${osc}12;$($s.cursorColor)${bel}"
+        Write-Host -NoNewline "${osc}10;$($s.foreground)${bel}${osc}11;$($s.background)${bel}"
+        $ansi = @($s.black, $s.red, $s.green, $s.yellow, $s.blue, $s.purple, $s.cyan, $s.white)
+        for ($i=0; $i -lt 8; $i++) { if ($ansi[$i]) { Write-Host -NoNewline "${osc}4;$i;$($ansi[$i])${bel}" } }
 
-        $ansiColors = @($s.black, $s.red, $s.green, $s.yellow, $s.blue, $s.purple, $s.cyan, $s.white)
-        for ($i = 0; $i -lt $ansiColors.Count; $i++) {
-            if ($ansiColors[$i]) { Write-Host -NoNewline "${osc}4;$i;$($ansiColors[$i])${bel}" }
+        if ($null -eq $settings.profiles.defaults) {
+            $settings.profiles | Add-Member -Name "defaults" -Value ([PSCustomObject]@{ colorScheme = $selectedName }) -MemberType NoteProperty -Force
+        } else {
+            $settings.profiles.defaults | Add-Member -Name "colorScheme" -Value $selectedName -MemberType NoteProperty -Force
         }
 
-        $settings.profiles.defaults.colorScheme = $selectedName
-
-        $psProfile = $settings.profiles.list | Where-Object { $_.name -match "PowerShell" }
-        if ($psProfile) {
-            foreach ($p in $psProfile) { $p.colorScheme = $selectedName }
+        foreach ($p in $settings.profiles.list) {
+            if ($p.name -eq "PowerShell" -or $p.name -match "PowerShell Core") {
+                $p | Add-Member -Name "colorScheme" -Value $selectedName -MemberType NoteProperty -Force
+            }
         }
 
         $settings | ConvertTo-Json -Depth 100 | Set-Content $wtPath
-
-        [Environment]::SetEnvironmentVariable("TERM_SCHEME_NAME", $selectedName, "User")
         
-        Write-Host "`n  🎨 Scheme '$selectedName' applied!" -ForegroundColor Cyan
-        Write-Host "  󰄬  Current session updated via OSC sequences." -ForegroundColor DarkGray
-        Write-Host "  󰄬  Settings.json updated for future sessions." -ForegroundColor DarkGray
+        Write-Host "`n  🎨 '$selectedName' applied!" -ForegroundColor Cyan
+        [Environment]::SetEnvironmentVariable("TERM_SCHEME_NAME", $selectedName, "User")
 
     } catch {
         Write-Host "  ❌ Error: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "  Tip: Check if your settings.json has trailing commas or syntax errors." -ForegroundColor DarkYellow
     }
 }
 
@@ -1293,9 +1329,9 @@ function Invoke-KillProcess {
         fzf --reverse --header "󰆴 SELECT PROCESS TO KILL (Sniper Mode)" --height 50%
 
     if ($proc) {
-        $pid = ($proc -split "ID: ")[1].Split("|")[0].Trim()
-        Stop-Process -Id $pid -Force
-        Write-Host "  ✅ Process $pid terminated." -ForegroundColor Green
+        $pids = ($proc -split "ID: ")[1].Split("|")[0].Trim()
+        Stop-Process -Id $pids -Force
+        Write-Host "  ✅ Process $pids terminated." -ForegroundColor Green
     }
 }
 
@@ -1547,7 +1583,7 @@ function Get-InstallHistory {
                 Write-Host ("{0,-38} " -f $details) -ForegroundColor Cyan -NoNewline
                 Write-Host "󱑤" -ForegroundColor Cyan
             }
-            Write-Host "" # Salto de línea limpio
+            Write-Host ""
         }
     }
 
@@ -1655,7 +1691,7 @@ function welcome {
     $totalThemes = 0
     if (Test-Path $settingsPath) {
         $raw = Get-Content $settingsPath -Raw
-        $clean = $raw -replace '(?m)^\s*//.*|(?m)\s//.*', '' # Limpieza de comentarios
+        $clean = $raw -replace '(?m)^\s*//.*|(?m)\s//.*', ''
         $totalThemes = ($clean | ConvertFrom-Json).schemes.Count
     }
 
