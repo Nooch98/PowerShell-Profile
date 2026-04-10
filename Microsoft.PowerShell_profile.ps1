@@ -995,7 +995,7 @@ function Get-RepoStats {
 
     $headers = @{ 
         "Authorization" = "token $token"
-        "Accept"         = "application/vnd.github.v3+json"
+        "Accept"        = "application/vnd.github.v3+json"
         "User-Agent"    = "PowerShell-CLI"
     }
 
@@ -1004,8 +1004,8 @@ function Get-RepoStats {
             $myRepos = Invoke-RestMethod -Uri "https://api.github.com/user/repos?per_page=100&sort=updated" -Headers $headers
             
             $fzfOut = $myRepos | Select-Object -ExpandProperty full_name | fzf --reverse `
-                --header "ENTER: Stats | CTRL-G: Clone repo" `
-                --expect="ctrl-g"
+                --header "ENTER: Stats | CTRL-G: Clone | CTRL-S: Sync Local (WARNING: Overwrites Local)" `
+                --expect="ctrl-g,ctrl-s"
 
             $key = $fzfOut[0]
             $repoName = $fzfOut[1]
@@ -1013,59 +1013,85 @@ function Get-RepoStats {
             if (-not $repoName) { return }
 
             if ($key -eq "ctrl-g") {
-                Write-Host "`n  📥 Cloning $repoName..." -ForegroundColor Cyan
+                Write-Host "`n 📥 Cloning $repoName..." -ForegroundColor Cyan
                 git clone "https://github.com/$( $repoName ).git"
                 return
             }
 
+            if ($key -eq "ctrl-s") {
+                $localFolder = ($repoName -split "/")[1]
+                
+                if (Test-Path $localFolder) {
+                    Write-Host "`n 🔍 Checking status for $localFolder..." -ForegroundColor Yellow
+                    
+                    $remoteRepo = $myRepos | Where-Object { $_.full_name -eq $repoName }
+                    $remoteUpdate = [DateTime]$remoteRepo.pushed_at
+
+                    Push-Location $localFolder
+                    try {
+                        git config core.longPaths true
+                        $localUpdate = [DateTime](git log -1 --format=%cI)
+
+                        if ($remoteUpdate -gt $localUpdate) {
+                            # WARNING: The following logic performs a HARD RESET.
+                            # It will overwrite ANY local changes to ensure the local environment 
+                            # matches the GitHub repository exactly (Source of Truth).
+                            Write-Host " 🆙 Remote is newer. Synchronizing local environment..." -ForegroundColor Cyan                            
+                            git fetch --all | Out-Null
+                            
+                            $branch = git symbolic-ref --short refs/remotes/origin/HEAD
+                            if ($null -eq $branch) { $branch = "origin/main" }
+                            
+                            git reset --hard $branch | Out-Null
+                            git clean -fd | Out-Null
+                            
+                            Write-Host " ✅ Done! Local version is now identical to GitHub." -ForegroundColor Green
+                        } else {
+                            Write-Host " ✨ Local version is already up to date." -ForegroundColor Green
+                        }
+                    } catch {
+                        Write-Host " ❌ Error: Could not sync. Is this a valid Git repo?" -ForegroundColor Red
+                    }
+                    Pop-Location
+                } else {
+                    Write-Host " ❌ Error: Local folder '$localFolder' not found." -ForegroundColor Red
+                }
+                return
+            }
         } catch {
             Write-Host "❌ Could not list repositories." -ForegroundColor Red; return
         }
     }
 
     $repoName = $repoName.Trim()
-
+    
     if ($View) {
         $type = @("Issues", "Pull Requests") | fzf --reverse --height 10% --header "What do you want to browse?"
         if (-not $type) { return }
-
         $queryType = if ($type -eq "Issues") { "is:issue" } else { "is:pr" }
         $searchUri = "https://api.github.com/search/issues?q=repo:$repoName+$queryType+is:open"
-        
         try {
             Write-Host "  🔍 Searching $type..." -ForegroundColor DarkGray
             $response = Invoke-RestMethod -Uri $searchUri -Headers $headers -ErrorAction Stop
             $items = $response.items
-            
             if ($null -eq $items -or $items.Count -eq 0) { 
                 Write-Host "`n  󰅚 No open $type found in $repoName." -ForegroundColor Yellow
                 return 
             }
-
             $selected = $items | ForEach-Object { 
                 "$($_.number.ToString().PadRight(5)) | $($_.user.login.PadRight(15)) | $($_.title)" 
             } | fzf --reverse --header "SELECT AN ITEM TO VIEW DETAILS" --preview-window=top:60%
-
             if ($selected) {
                 $number = ($selected -split " \| ")[0].Trim()
                 $detail = $items | Where-Object { $_.number -eq $number }
-                
                 Clear-Host
                 Write-Host "`n  #$($detail.number): $($detail.title)" -ForegroundColor Magenta
                 Write-Host "  Author: $($detail.user.login) | Created: $([DateTime]$detail.created_at)" -ForegroundColor DarkGray
                 Write-Host "  " + ("-" * 60) -ForegroundColor DarkGray
-                
-                if ($detail.body) {
-                    $detail.body | bat --language md --style=plain
-                } else {
-                    Write-Host "  (No description provided)" -ForegroundColor DarkGray
-                }
-                
+                if ($detail.body) { $detail.body | bat --language md --style=plain } else { Write-Host "  (No description provided)" -ForegroundColor DarkGray }
                 Write-Host "`n  🔗 URL: $($detail.html_url)" -ForegroundColor Cyan
             }
-        } catch {
-            Write-Host "`n  󰅚 GitHub API Error: Could not access repository search." -ForegroundColor Red
-        }
+        } catch { Write-Host "`n  󰅚 GitHub API Error." -ForegroundColor Red }
         return
     }
 
@@ -1076,11 +1102,7 @@ function Get-RepoStats {
         $trafficViews  = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/traffic/views" -Headers $headers
         $releases      = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/releases" -Headers $headers
         $pulls         = Invoke-RestMethod -Uri "https://api.github.com/repos/$repoName/pulls?state=open" -Headers $headers
-
-        $releaseText = if ($releases.Count -gt 0) { 
-            "$($releases[0].tag_name) (Total: $($releases.Count))" 
-        } else { "None" }
-        
+        $releaseText = if ($releases.Count -gt 0) { "$($releases[0].tag_name) (Total: $($releases.Count))" } else { "None" }
         $prCount = $pulls.Count
         $actualIssues = $mainInfo.open_issues_count - $prCount
         $lastPush = if ($mainInfo.pushed_at) { ([DateTime]$mainInfo.pushed_at).ToString("MM/dd/yyyy HH:mm") } else { "N/A" }
@@ -1106,12 +1128,7 @@ function Get-RepoStats {
             Write-Host "  $($s.Icon) $($s.Label) : " -NoNewline
             Write-Host $s.Value -ForegroundColor $s.Color
         }
-        Write-Host "`n  💡 Tip: Use 'rs -View' to browse Issues/PRs" -ForegroundColor DarkGray
-        Write-Host "  " + ("=" * 45) -ForegroundColor DarkGray
-
-    } catch {
-        Write-Host "❌ Error: $($_.Exception.Message)" -ForegroundColor Red
-    }
+    } catch { Write-Host "❌ Error: $($_.Exception.Message)" -ForegroundColor Red }
 }
 
 function Set-TerminalScheme {
