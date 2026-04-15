@@ -50,6 +50,95 @@ Invoke-Expression (& { (zoxide init powershell | Out-String) })
 
 oh-my-posh init pwsh --config C:\Users\Nooch\Documents\PowerShell\\craver.omp.json | Invoke-Expression
 
+function Get-PortableVcsInfo {
+    try {
+        $dir = Get-Location
+
+        # Find repo root by walking upward until .vcs\repo.json is found
+        $localRepoFile = $null
+        while ($dir -ne $null) {
+            $candidate = Join-Path $dir.Path ".vcs\repo.json"
+            if (Test-Path $candidate) {
+                $localRepoFile = $candidate
+                break
+            }
+            $dir = $dir.Parent
+        }
+
+        if (-not $localRepoFile) {
+            Remove-Item Env:POSH_VCS_TRACK -ErrorAction SilentlyContinue
+            Remove-Item Env:POSH_VCS_TRACK_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:POSH_VCS_SNAPSHOTS -ErrorAction SilentlyContinue
+            return
+        }
+
+        $localRepo = Get-Content $localRepoFile -Raw | ConvertFrom-Json
+        $repoId = [string]$localRepo.repo_id
+
+        if ([string]::IsNullOrWhiteSpace($repoId)) {
+            Remove-Item Env:POSH_VCS_TRACK -ErrorAction SilentlyContinue
+            Remove-Item Env:POSH_VCS_TRACK_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:POSH_VCS_SNAPSHOTS -ErrorAction SilentlyContinue
+            return
+        }
+
+        $metaFile = $null
+
+        foreach ($letter in 'D'..'Z') {
+            $driveRoot = "${letter}:\"
+
+            if (-not (Test-Path $driveRoot)) {
+                continue
+            }
+
+            $marker = Join-Path $driveRoot ".vcs_drive"
+            $candidate = Join-Path $driveRoot "repos\$repoId\meta.json"
+
+            if ((Test-Path $marker) -and (Test-Path $candidate)) {
+                $metaFile = $candidate
+                break
+            }
+        }
+
+        if (-not $metaFile) {
+            Remove-Item Env:POSH_VCS_TRACK -ErrorAction SilentlyContinue
+            Remove-Item Env:POSH_VCS_TRACK_NAME -ErrorAction SilentlyContinue
+            Remove-Item Env:POSH_VCS_SNAPSHOTS -ErrorAction SilentlyContinue
+            return
+        }
+
+        $meta = Get-Content $metaFile -Raw | ConvertFrom-Json
+        $activeTrack = [string]$meta.active_track
+
+        if ([string]::IsNullOrWhiteSpace($activeTrack)) {
+            $activeTrack = "main"
+        }
+
+        $snapshotCount = 0
+        if ($meta.tracks -and $meta.tracks.$activeTrack -and $meta.tracks.$activeTrack.logs) {
+            $snapshotCount = @($meta.tracks.$activeTrack.logs).Count
+        }
+
+        $env:POSH_VCS_TRACK_NAME = $activeTrack
+        $env:POSH_VCS_SNAPSHOTS = "$snapshotCount"
+        $env:POSH_VCS_TRACK = "${activeTrack}:$snapshotCount"
+
+    }
+    catch {
+        Write-Host "Portable VCS prompt error: $($_.Exception.Message)" -ForegroundColor Red
+        Remove-Item Env:POSH_VCS_TRACK -ErrorAction SilentlyContinue
+        Remove-Item Env:POSH_VCS_TRACK_NAME -ErrorAction SilentlyContinue
+        Remove-Item Env:POSH_VCS_SNAPSHOTS -ErrorAction SilentlyContinue
+    }
+}
+
+$originalPrompt = $function:prompt
+
+function global:prompt {
+    Get-PortableVcsInfo
+    & $originalPrompt
+}
+
 # ========================================================================
 # 2. PSReadLine and FZF config (Input and colors) 
 # ========================================================================
